@@ -1,0 +1,13 @@
+[package]
+name = "mouseshare-discovery"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mouseshare-protocol = { path = "../protocol" }
+mdns-sd = "0.21"
+thiserror = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tracing-subscriber = "0.3"

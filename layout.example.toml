@@ -1,0 +1,23 @@
+# Example two-screen layout: "A" (left) and "B" (right), same height.
+# Coordinates are in a shared virtual-desktop space; edges must touch for
+# the cursor to hand off between screens with no gap or overlap.
+#
+# `local_id` says which of the screens below *this* machine is. Run the
+# same file on both machines, just pointing local_id at "A" on one and "B"
+# on the other.
+
+local_id = "A"
+
+[[screens]]
+id = "A"
+x = 0
+y = 0
+width = 1920
+height = 1080
+
+[[screens]]
+id = "B"
+x = 1920
+y = 0
+width = 1920
+height = 1080

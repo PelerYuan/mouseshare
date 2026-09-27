@@ -195,7 +195,15 @@ pub fn discover(timeout: Duration) -> Result<Vec<DiscoveredPeer>, DiscoveryError
     let receiver = daemon.browse(SERVICE_TYPE)?;
 
     let deadline = Instant::now() + timeout;
-    let mut peers = Vec::new();
+    // Keyed by the service's mDNS fullname (not screen_id, though in
+    // practice they're the same string): addresses for one instance
+    // resolve incrementally over several `ServiceResolved` events (e.g.
+    // IPv6 link-local first, then loopback, then the real LAN IPv4
+    // address, each as its own event with its own address snapshot), so a
+    // later event for the same instance should replace an earlier one
+    // rather than accumulate as a separate, possibly-stale duplicate.
+    let mut peers: std::collections::HashMap<String, DiscoveredPeer> =
+        std::collections::HashMap::new();
 
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -205,11 +213,18 @@ pub fn discover(timeout: Duration) -> Result<Vec<DiscoveredPeer>, DiscoveryError
 
         match receiver.recv_timeout(remaining) {
             Ok(ServiceEvent::ServiceResolved(info)) => match peer_from_resolved(&info) {
-                Some(peer) => peers.push(peer),
+                Some(peer) => {
+                    peers.insert(info.fullname.clone(), peer);
+                }
                 None => {
-                    tracing::warn!(
+                    // Normal and common, not a problem: this instance just
+                    // hasn't resolved a usable address yet on this event
+                    // (e.g. only its IPv6 link-local address has arrived so
+                    // far). A later event for the same fullname will
+                    // typically supersede it before `timeout` elapses.
+                    tracing::debug!(
                         fullname = %info.fullname,
-                        "discovered mouseshare service is missing screen_id or has no address; skipping"
+                        "resolved mouseshare service has no usable address yet; waiting for a further update"
                     );
                 }
             },
@@ -225,7 +240,7 @@ pub fn discover(timeout: Duration) -> Result<Vec<DiscoveredPeer>, DiscoveryError
     let _ = daemon.stop_browse(SERVICE_TYPE);
     let _ = daemon.shutdown();
 
-    Ok(peers)
+    Ok(peers.into_values().collect())
 }
 
 fn peer_from_resolved(info: &ResolvedService) -> Option<DiscoveredPeer> {
@@ -234,14 +249,15 @@ fn peer_from_resolved(info: &ResolvedService) -> Option<DiscoveredPeer> {
         .get_property_val_str(TXT_KEY_SCREEN_ID)?
         .to_string();
 
-    // Prefer an IPv4 address if one was resolved (the common LAN case);
-    // fall back to whatever else is available (e.g. IPv6-only networks).
-    let ip = info
-        .addresses
-        .iter()
-        .find(|addr| addr.is_ipv4())
-        .or_else(|| info.addresses.iter().next())?
-        .to_ip_addr();
+    // IPv4 only: mdns-sd's resolved address set loses the zone/scope id an
+    // IPv6 link-local address needs to be dialable (`to_ip_addr()` below
+    // returns a bare `Ipv6Addr`), so handing one back as a plain
+    // `SocketAddr` produces an address `TcpStream::connect` rejects with
+    // EINVAL. This app has no need for IPv6 in the first place -- LAN mouse
+    // sharing -- so the simplest correct fix is to only ever report an
+    // IPv4 address, and treat "no IPv4 resolved for this instance yet" the
+    // same as "not resolved yet" rather than handing back a broken one.
+    let ip = info.addresses.iter().find(|addr| addr.is_ipv4())?.to_ip_addr();
 
     Some(DiscoveredPeer {
         screen_id,

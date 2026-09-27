@@ -7,6 +7,7 @@
 //! report / commit message for what was verified in the sandboxed dev VM
 //! this crate was originally built in.
 
+use std::net::TcpListener;
 use std::time::Duration;
 
 use mouseshare_discovery::{discover, Announcement, DiscoveryError};
@@ -36,6 +37,59 @@ fn announced_peer_is_discovered() {
         "expected to discover screen_id={screen_id:?} among peers, got: {peers:?}"
     );
     assert_eq!(found.unwrap().addr.port(), port);
+}
+
+/// The address `discover()` hands back must be directly dialable, not just
+/// well-formed. Regression test for a real bug: mDNS resolves an instance's
+/// addresses incrementally, and an early `ServiceResolved` event can carry
+/// only an IPv6 link-local address, which mdns-sd's `to_ip_addr()` returns
+/// without its zone/scope id -- connecting to that produces a bare EINVAL
+/// from the kernel. `discover()` must wait for (or otherwise only report) a
+/// real, connectable address.
+///
+/// Binds an actual listener on the announced port and connects to whatever
+/// `discover()` returns, so this fails the exact way a real caller's
+/// `mouseshare_net::connect()` would if the bug were still present.
+#[test]
+fn discovered_peer_address_is_actually_dialable() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let screen_id = format!("discovery-test-dial-{}", std::process::id());
+    let listener = TcpListener::bind("0.0.0.0:0").expect("bind ephemeral listener");
+    let port = listener.local_addr().unwrap().port();
+
+    let _announcement = Announcement::start(&screen_id, port).expect("start");
+    let peers = discover(Duration::from_secs(5)).expect("discover() should succeed");
+    let found = peers
+        .iter()
+        .find(|p| p.screen_id == screen_id)
+        .unwrap_or_else(|| panic!("expected to discover screen_id={screen_id:?}, got: {peers:?}"));
+
+    std::net::TcpStream::connect(found.addr).unwrap_or_else(|e| {
+        panic!("discovered address {} should be directly dialable, but connect failed: {e}", found.addr)
+    });
+}
+
+/// Addresses for one announced instance resolve incrementally (see the
+/// dialable-address test above), which previously caused `discover()` to
+/// accumulate a separate `DiscoveredPeer` per partial resolution rather than
+/// converging on one. A caller that just takes the first match for a
+/// screen_id (as `mouseshare`'s controller does) needs that first match to
+/// always be a good one, not whichever partial resolution happened to
+/// arrive first.
+#[test]
+fn discover_returns_at_most_one_entry_per_screen_id() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let screen_id = format!("discovery-test-dedupe-{}", std::process::id());
+    let _announcement = Announcement::start(&screen_id, 17_880).expect("start");
+
+    let peers = discover(Duration::from_secs(5)).expect("discover() should succeed");
+    let count = peers.iter().filter(|p| p.screen_id == screen_id).count();
+    assert_eq!(
+        count, 1,
+        "discover() should dedupe to a single entry per instance, got: {peers:?}"
+    );
 }
 
 /// `Announcement::start` should reject an empty screen_id up front, without

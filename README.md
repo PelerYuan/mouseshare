@@ -48,6 +48,27 @@ Move the mouse into the edge of the controller's screen that borders the
 target's screen in the layout config, and control (mouse and keyboard)
 hands off.
 
+## GUI
+
+`mouseshare-gui` is an optional, separately-built binary for people who'd
+rather not hand-edit TOML: it auto-detects your local screen resolution
+and hostname, lets you pick controller/target and drag the remote screen
+against any edge of the local one (always snapping flush, so the layout
+crate's touching-edges invariant holds), scans the LAN for other
+mouseshare instances via mDNS with click-to-fill, and shows a live log
+panel. It's built on the same `mouseshare-core` runtime as the CLI, just a
+different frontend.
+
+```bash
+cargo run --release -p mouseshare-gui
+```
+
+This is a deliberate exception to the project's lightweight-by-default
+stance: pulling in `egui`/`eframe` costs real size (~5M release, stripped,
+vs. the CLI's ~1.4M) for the sake of not hand-editing config files. The
+CLI binary is completely unaffected — it's a separate crate/binary and
+doesn't depend on the GUI crate at all.
+
 ## Layout
 
 Workspace crates:
@@ -72,14 +93,23 @@ Workspace crates:
 - `crates/discovery` — LAN auto-discovery via mDNS/DNS-SD (`mdns-sd`):
   `Announcement::start` advertises a target's `screen_id`/port, `discover`
   browses for one.
+- `crates/core` — the actual controller/target runtime loops
+  (`run_controller`, `run_target`, `resolve_target_addr`), shared by every
+  frontend so there's exactly one implementation to get right and keep
+  tested. Observability is left to `tracing` rather than a bespoke
+  callback API, so each frontend can install whatever subscriber suits it.
+- `crates/gui` — the optional `mouseshare-gui` binary (see "GUI" above):
+  `eframe`/`egui` UI, a drag-and-snap screen-arrangement widget, and a
+  `tracing_subscriber` writer that feeds a live log panel.
 
 `KeyEvent`'s keycode is a raw, unmapped X11 keycode: fine while both ends
 are X11 (the only backend that exists so far), but not real cross-platform
 key translation — see that variant's doc comment in
 `crates/protocol/src/lib.rs`.
 
-`src/main.rs` ties these together into the actual binary (controller role
-vs. target role, selected on the command line).
+`src/main.rs` is a thin CLI wrapper around `mouseshare-core` (arg parsing,
+loading the layout file, picking controller/target role); `crates/gui`'s
+`main.rs` is the other frontend on top of the same core.
 
 ## Config
 

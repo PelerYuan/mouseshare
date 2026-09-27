@@ -25,6 +25,14 @@ pub enum Message {
         dx: i32,
         dy: i32,
     },
+    /// A key press or release. `keycode` is a raw X11 keycode (the X11
+    /// protocol defines these as 8-bit values) — both ends are X11 for
+    /// now, so it's passed through unmapped. A cross-platform key
+    /// representation is out of scope until a non-X11 backend exists.
+    KeyEvent {
+        keycode: u8,
+        pressed: bool,
+    },
     Heartbeat,
 }
 
@@ -78,6 +86,8 @@ mod tests {
                 height: 720,
             },
             Message::MouseMove { dx: -5, dy: 12 },
+            Message::KeyEvent { keycode: 38, pressed: true },
+            Message::KeyEvent { keycode: 38, pressed: false },
             Message::Heartbeat,
         ];
         for msg in messages {

@@ -145,9 +145,23 @@ impl LocalCursor {
     }
 
     /// Drains all pointer-motion events received since the last call, each
-    /// already converted to a delta from the center reference point, and
-    /// re-centers the pointer after reading. Returns an empty `Vec` if
-    /// nothing moved. Must be called after [`LocalCursor::begin_capture`].
+    /// converted to a delta *from the previous event in this same batch*
+    /// (or from the center reference point, for the first event in the
+    /// batch), and re-centers the pointer after reading if it moved.
+    /// Returns an empty `Vec` if nothing moved. Must be called after
+    /// [`LocalCursor::begin_capture`].
+    ///
+    /// Deltas are computed incrementally rather than each being measured
+    /// against the fixed center: the server reports each `MotionNotify`'s
+    /// *absolute* position, and the recenter warp is only sent once after
+    /// the whole batch is drained (queuing a warp per event would flood the
+    /// server and generate self-inflicted motion events during fast
+    /// movement). If every event's delta were instead computed against the
+    /// same stale center, a batch of more than one event would double-count
+    /// the earlier events' displacement — e.g. two queued moves to
+    /// center+50 and then center+100 would wrongly report deltas of +50 and
+    /// +100 (summing to 150 for an actual 100px move) instead of +50 and
+    /// +50.
     ///
     /// This is non-blocking: it only looks at events already buffered by the
     /// connection (see the crate docs / integration notes on driving this
@@ -156,26 +170,27 @@ impl LocalCursor {
         let center = self.capture.as_ref().ok_or(X11Error::NotCapturing)?.center;
 
         let mut deltas = Vec::new();
-        let mut needs_recenter = false;
+        let mut last = center;
         while let Some(event) = self.conn.poll_for_event()? {
             if let Event::MotionNotify(motion) = event {
-                let dx = motion.event_x as i32 - center.0;
-                let dy = motion.event_y as i32 - center.1;
+                let pos = (motion.event_x as i32, motion.event_y as i32);
+                let dx = pos.0 - last.0;
+                let dy = pos.1 - last.1;
                 if dx != 0 || dy != 0 {
                     deltas.push((dx, dy));
-                    needs_recenter = true;
                 }
+                last = pos;
             }
             // Other event kinds (button presses, etc.) are outside this
             // crate's scope and are intentionally dropped.
         }
 
-        if needs_recenter {
+        if last != center {
             // Requests are processed by the server strictly in the order
             // they were sent on this connection, so it's safe to queue this
-            // warp without waiting for a reply for every single event above
-            // — the next batch of MotionNotify events will already be
-            // relative to the new center by the time we read them.
+            // warp without waiting for a reply — the next batch of
+            // MotionNotify events will already be relative to the new
+            // center by the time we read them.
             self.conn
                 .warp_pointer(NONE, self.root, 0, 0, 0, 0, center.0 as i16, center.1 as i16)?
                 .ignore_error();

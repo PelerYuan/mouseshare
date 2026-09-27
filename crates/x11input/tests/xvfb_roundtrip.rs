@@ -213,6 +213,41 @@ fn capture_role_reports_correct_deltas() {
     assert_eq!((fx, fy), (10, 10));
 }
 
+/// Regression test for a bug where `poll_capture_delta` computed every
+/// event in a drained batch as a delta from the same stale center point,
+/// instead of from the previous event in the batch — which double-counts
+/// earlier events whenever more than one `MotionNotify` lands before a
+/// single poll call drains them (a realistic scenario: the poller doesn't
+/// necessarily run between every individual OS-level mouse event).
+#[test]
+fn poll_capture_delta_does_not_double_count_a_batched_burst() {
+    let guard = XvfbGuard::spawn(99, 800, 600);
+
+    let mut cursor = LocalCursor::connect(Some(&guard.display)).expect("connect");
+    cursor.begin_capture().expect("begin_capture");
+    assert_eq!(cursor.query_pointer().unwrap(), (400, 300));
+
+    // Two moves back-to-back with NO poll_capture_delta call in between, so
+    // (contingent on the server not coalescing them) both MotionNotify
+    // events should be sitting in the connection's buffer together the
+    // first time we drain it below.
+    xdotool_mousemove(&guard.display, 450, 300); // +50 from center
+    xdotool_mousemove(&guard.display, 500, 300); // +50 more (total +100 from center)
+
+    // xdotool's --sync only guarantees the move itself completed, not that
+    // our client has received the notification yet; give it a moment.
+    std::thread::sleep(Duration::from_millis(200));
+
+    let batch = cursor.poll_capture_delta().expect("poll_capture_delta");
+    let sum: i32 = batch.iter().map(|(dx, _)| dx).sum();
+    assert!(
+        (sum - 100).abs() <= 5,
+        "expected batched deltas to sum to ~100 (not double-counted), got {batch:?} (sum={sum})"
+    );
+
+    cursor.end_capture().expect("end_capture");
+}
+
 #[test]
 fn inject_role_warps_relative_and_absolute() {
     let guard = XvfbGuard::spawn(98, 800, 600);

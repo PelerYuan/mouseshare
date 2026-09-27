@@ -1,31 +1,39 @@
-//! Direct X11-protocol pointer capture/injection for mouseshare.
+//! Direct X11-protocol pointer/keyboard capture and injection for
+//! mouseshare.
 //!
 //! This crate talks to an X server using raw core-protocol requests via
-//! [`x11rb`] — no XTest extension is required for anything implemented here.
+//! [`x11rb`] for everything except key *injection*, which needs the XTest
+//! extension (there is no core-protocol way to synthesize input).
 //!
 //! There are two roles:
 //!
-//! * **Capture** (the machine that currently owns the physical mouse):
-//!   [`LocalCursor::begin_capture`] actively grabs the pointer, confines it to
-//!   the root window, and warps it to a fixed center point. From then on,
+//! * **Capture** (the machine that currently owns the physical mouse and
+//!   keyboard): [`LocalCursor::begin_capture`] actively grabs both the
+//!   pointer and the keyboard, confines the pointer to the root window, and
+//!   warps it to a fixed center point. From then on,
 //!   [`LocalCursor::poll_capture_delta`] drains queued `MotionNotify` events,
 //!   turning each one into a `(dx, dy)` delta relative to that center point,
 //!   and re-warps the pointer back to center after every event so the
-//!   visible OS cursor never actually travels. This is the same trick
-//!   Synergy/Barrier use on X11.
-//! * **Inject** (the machine currently receiving forwarded deltas):
+//!   visible OS cursor never actually travels (the same trick Synergy/Barrier
+//!   use on X11), while [`LocalCursor::poll_capture_keys`] drains queued
+//!   `KeyPress`/`KeyRelease` events as `(keycode, pressed)` pairs.
+//! * **Inject** (the machine currently receiving forwarded input):
 //!   [`LocalCursor::warp_relative`] applies a relative pointer motion using
 //!   the core `WarpPointer` request (source and destination windows both
-//!   `None`), and [`LocalCursor::warp_absolute`] places the pointer at an
-//!   exact position on the root window (source window `None`, destination
-//!   window the root window).
+//!   `None`), [`LocalCursor::warp_absolute`] places the pointer at an exact
+//!   position on the root window (source window `None`, destination window
+//!   the root window), and [`LocalCursor::inject_key`] synthesizes a key
+//!   press/release via the XTest extension's `FakeInput` request.
 //!
 //! See the crate-level tests in `tests/` for an end-to-end exercise of both
 //! roles against real (headless) `Xvfb` servers.
 
 use x11rb::connection::Connection;
 use x11rb::errors::{ConnectError, ConnectionError, ReplyError, ReplyOrIdError};
-use x11rb::protocol::xproto::{ConnectionExt, EventMask, GrabMode, GrabStatus, Window};
+use x11rb::protocol::xproto::{
+    ConnectionExt, EventMask, GrabMode, GrabStatus, Window, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
+};
+use x11rb::protocol::xtest::ConnectionExt as XtestConnectionExt;
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::NONE;
@@ -51,20 +59,29 @@ pub enum X11Error {
     #[error("X11 request failed: {0}")]
     ReplyOrId(#[from] ReplyOrIdError),
 
-    /// `GrabPointer` did not return `Success` (e.g. some other client
-    /// already has an active pointer grab).
-    #[error("pointer grab failed with status {0:?}")]
+    /// `GrabPointer` or `GrabKeyboard` did not return `Success` (e.g. some
+    /// other client already has an active grab).
+    #[error("grab failed with status {0:?}")]
     GrabFailed(GrabStatus),
 
-    /// [`LocalCursor::poll_capture_delta`] or [`LocalCursor::end_capture`]
-    /// was called while not in capture mode.
+    /// [`LocalCursor::poll_capture_delta`], [`LocalCursor::poll_capture_keys`]
+    /// or [`LocalCursor::end_capture`] was called while not in capture mode.
     #[error("not currently capturing the pointer")]
     NotCapturing,
 }
 
-/// A reference point plus grab bookkeeping used while in "capture" mode.
+/// A reference point, plus buffered events not yet claimed by the
+/// corresponding `poll_capture_*` method, used while in "capture" mode.
+///
+/// Both `poll_capture_delta` and `poll_capture_keys` read from the same
+/// underlying X connection event queue, so whichever one is called first in
+/// a given tick has to see (and stash) the other kind of event too, rather
+/// than silently dropping it. See `drain_queued_events` for the shared drain
+/// logic.
 struct CaptureState {
     center: (i32, i32),
+    pending_deltas: Vec<(i32, i32)>,
+    pending_keys: Vec<(u8, bool)>,
 }
 
 /// A connection to a single X display, with the local root window's geometry
@@ -111,9 +128,14 @@ impl LocalCursor {
         (self.width, self.height)
     }
 
-    /// Grabs the pointer (confined to the root window) and warps it to a
-    /// fixed center reference point, entering "capture" mode. Calling this
-    /// again while already capturing is a no-op that re-confirms the grab.
+    /// Grabs the pointer (confined to the root window) and the keyboard, and
+    /// warps the pointer to a fixed center reference point, entering
+    /// "capture" mode. Calling this again while already capturing is a
+    /// no-op that re-confirms both grabs.
+    ///
+    /// If the keyboard grab fails after the pointer grab already succeeded,
+    /// the pointer grab is released before returning the error, so a failed
+    /// call never leaves a dangling pointer grab behind.
     pub fn begin_capture(&mut self) -> Result<(), X11Error> {
         let reply = self
             .conn
@@ -132,6 +154,14 @@ impl LocalCursor {
             return Err(X11Error::GrabFailed(reply.status));
         }
 
+        if let Err(err) = self.grab_keyboard_only() {
+            // Don't leak the pointer grab we just took if the keyboard grab
+            // fails for any reason.
+            let _ = self.conn.ungrab_pointer(x11rb::CURRENT_TIME);
+            let _ = self.conn.flush();
+            return Err(err);
+        }
+
         let center = (self.width / 2, self.height / 2);
         self.warp_absolute(center.0, center.1)?;
         // Drain and discard the MotionNotify that our own warp just queued
@@ -140,16 +170,46 @@ impl LocalCursor {
         // this also flushes the connection).
         while self.conn.poll_for_event()?.is_some() {}
 
-        self.capture = Some(CaptureState { center });
+        self.capture = Some(CaptureState {
+            center,
+            pending_deltas: Vec::new(),
+            pending_keys: Vec::new(),
+        });
         Ok(())
     }
 
-    /// Drains all pointer-motion events received since the last call, each
-    /// converted to a delta *from the previous event in this same batch*
-    /// (or from the center reference point, for the first event in the
-    /// batch), and re-centers the pointer after reading if it moved.
-    /// Returns an empty `Vec` if nothing moved. Must be called after
-    /// [`LocalCursor::begin_capture`].
+    /// Just the `GrabKeyboard` half of `begin_capture`, split out so the
+    /// pointer-grab cleanup on failure has a single call site to wrap.
+    fn grab_keyboard_only(&self) -> Result<(), X11Error> {
+        let reply = self
+            .conn
+            .grab_keyboard(
+                false,
+                self.root,
+                x11rb::CURRENT_TIME,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            )?
+            .reply()?;
+        if reply.status != GrabStatus::SUCCESS {
+            return Err(X11Error::GrabFailed(reply.status));
+        }
+        Ok(())
+    }
+
+    /// Drains every event currently buffered on the connection, exactly
+    /// once, sorting `MotionNotify` into `pending_deltas` (converted to
+    /// incremental deltas, same as before) and `KeyPress`/`KeyRelease` into
+    /// `pending_keys`. Re-centers the pointer afterwards if it moved.
+    ///
+    /// This exists because `poll_capture_delta` and `poll_capture_keys` both
+    /// need to read from the single underlying X connection event queue:
+    /// `poll_for_event` is destructive, so if each method read the
+    /// connection directly, whichever one happened to be called first in a
+    /// given tick would silently steal (and drop) the other kind of event.
+    /// Routing both through this one drain and buffering into two separate
+    /// `Vec`s means it doesn't matter which of the two public methods is
+    /// called first, or how often either is called relative to the other.
     ///
     /// Deltas are computed incrementally rather than each being measured
     /// against the fixed center: the server reports each `MotionNotify`'s
@@ -162,27 +222,29 @@ impl LocalCursor {
     /// center+50 and then center+100 would wrongly report deltas of +50 and
     /// +100 (summing to 150 for an actual 100px move) instead of +50 and
     /// +50.
-    ///
-    /// This is non-blocking: it only looks at events already buffered by the
-    /// connection (see the crate docs / integration notes on driving this
-    /// from an async context).
-    pub fn poll_capture_delta(&mut self) -> Result<Vec<(i32, i32)>, X11Error> {
+    fn drain_queued_events(&mut self) -> Result<(), X11Error> {
         let center = self.capture.as_ref().ok_or(X11Error::NotCapturing)?.center;
 
-        let mut deltas = Vec::new();
         let mut last = center;
+        let mut new_deltas = Vec::new();
+        let mut new_keys = Vec::new();
         while let Some(event) = self.conn.poll_for_event()? {
-            if let Event::MotionNotify(motion) = event {
-                let pos = (motion.event_x as i32, motion.event_y as i32);
-                let dx = pos.0 - last.0;
-                let dy = pos.1 - last.1;
-                if dx != 0 || dy != 0 {
-                    deltas.push((dx, dy));
+            match event {
+                Event::MotionNotify(motion) => {
+                    let pos = (motion.event_x as i32, motion.event_y as i32);
+                    let dx = pos.0 - last.0;
+                    let dy = pos.1 - last.1;
+                    if dx != 0 || dy != 0 {
+                        new_deltas.push((dx, dy));
+                    }
+                    last = pos;
                 }
-                last = pos;
+                Event::KeyPress(key) => new_keys.push((key.detail, true)),
+                Event::KeyRelease(key) => new_keys.push((key.detail, false)),
+                // Other event kinds (button presses, etc.) are outside this
+                // crate's scope and are intentionally dropped.
+                _ => {}
             }
-            // Other event kinds (button presses, etc.) are outside this
-            // crate's scope and are intentionally dropped.
         }
 
         if last != center {
@@ -197,15 +259,57 @@ impl LocalCursor {
             self.conn.flush()?;
         }
 
-        Ok(deltas)
+        // Recheck capture state: `?` above returns early if it was cleared
+        // mid-drain, which can't actually happen since we hold `&mut self`,
+        // but keeps this robust to future refactors.
+        let state = self.capture.as_mut().ok_or(X11Error::NotCapturing)?;
+        state.pending_deltas.extend(new_deltas);
+        state.pending_keys.extend(new_keys);
+        Ok(())
     }
 
-    /// Ungrabs the pointer, leaving capture mode.
+    /// Drains all pointer-motion events received since the last call to
+    /// this or [`LocalCursor::poll_capture_keys`], each converted to a delta
+    /// *from the previous event in this same batch* (or from the center
+    /// reference point, for the first event in the batch), and re-centers
+    /// the pointer after reading if it moved. Returns an empty `Vec` if
+    /// nothing moved. Must be called after [`LocalCursor::begin_capture`].
+    ///
+    /// This is non-blocking: it only looks at events already buffered by the
+    /// connection (see the crate docs / integration notes on driving this
+    /// from an async context).
+    pub fn poll_capture_delta(&mut self) -> Result<Vec<(i32, i32)>, X11Error> {
+        self.drain_queued_events()?;
+        let state = self.capture.as_mut().ok_or(X11Error::NotCapturing)?;
+        Ok(std::mem::take(&mut state.pending_deltas))
+    }
+
+    /// Drains all `KeyPress`/`KeyRelease` events received since the last
+    /// call to this or [`LocalCursor::poll_capture_delta`], each reported
+    /// as-is (no delta math needed, unlike pointer motion) as a
+    /// `(keycode, pressed)` pair, in the order the server sent them. Returns
+    /// an empty `Vec` if no keys were pressed or released. Must be called
+    /// after [`LocalCursor::begin_capture`].
+    ///
+    /// This is non-blocking, exactly like `poll_capture_delta`: it only
+    /// looks at events already buffered by the connection. It's safe to
+    /// call this and `poll_capture_delta` in either order, at any relative
+    /// frequency: both methods drain the same underlying connection through
+    /// a shared internal buffer, so neither one can steal events that
+    /// belong to the other.
+    pub fn poll_capture_keys(&mut self) -> Result<Vec<(u8, bool)>, X11Error> {
+        self.drain_queued_events()?;
+        let state = self.capture.as_mut().ok_or(X11Error::NotCapturing)?;
+        Ok(std::mem::take(&mut state.pending_keys))
+    }
+
+    /// Ungrabs the pointer and the keyboard, leaving capture mode.
     pub fn end_capture(&mut self) -> Result<(), X11Error> {
         if self.capture.take().is_none() {
             return Err(X11Error::NotCapturing);
         }
         self.conn.ungrab_pointer(x11rb::CURRENT_TIME)?.check()?;
+        self.conn.ungrab_keyboard(x11rb::CURRENT_TIME)?.check()?;
         self.conn.flush()?;
         Ok(())
     }
@@ -226,6 +330,28 @@ impl LocalCursor {
     pub fn warp_absolute(&self, x: i32, y: i32) -> Result<(), X11Error> {
         self.conn
             .warp_pointer(NONE, self.root, 0, 0, 0, 0, x as i16, y as i16)?
+            .check()?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Injects a key press or release (the "inject" role) using the XTest
+    /// extension's `FakeInput` request. Unlike `warp_relative`/
+    /// `warp_absolute`, this cannot be done with a core-protocol request —
+    /// there's no core way for a client to synthesize input — hence this
+    /// crate's `x11rb` dependency needing the `"xtest"` feature.
+    ///
+    /// `keycode` is a raw X11 keycode, passed straight through with no
+    /// remapping (matches `protocol::Message::KeyEvent`, which is likewise
+    /// unmapped for now since both ends are X11-only).
+    pub fn inject_key(&self, keycode: u8, pressed: bool) -> Result<(), X11Error> {
+        let event_type = if pressed {
+            KEY_PRESS_EVENT
+        } else {
+            KEY_RELEASE_EVENT
+        };
+        self.conn
+            .xtest_fake_input(event_type, keycode, 0, self.root, 0, 0, 0)?
             .check()?;
         self.conn.flush()?;
         Ok(())

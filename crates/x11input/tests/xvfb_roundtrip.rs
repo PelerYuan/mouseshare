@@ -1,18 +1,25 @@
-//! End-to-end test against two real (headless) Xvfb servers.
+//! End-to-end test against several real (headless) Xvfb servers.
 //!
-//! Display :97 is used to exercise the "capture" role (grab + recenter +
-//! delta accumulation) by driving the pointer with `xdotool mousemove`.
-//! Display :98 is used to exercise the "inject" role (`warp_relative` /
-//! `warp_absolute`), cross-checked against `xdotool getmouselocation`.
+//! Display :97 is used to exercise the pointer side of the "capture" role
+//! (grab + recenter + delta accumulation) by driving the pointer with
+//! `xdotool mousemove`. Display :98 is used to exercise the "inject" role
+//! (`warp_relative` / `warp_absolute`), cross-checked against `xdotool
+//! getmouselocation`. Display :99 is a regression test for batched-motion
+//! delta accounting. Displays :94-:96 exercise the keyboard additions:
+//! capture (`poll_capture_keys`), the pointer/keyboard poll interleaving
+//! guarantee, and key injection (`inject_key`, checked via the core
+//! `QueryKeymap` request).
 //!
-//! Both Xvfb children are always killed on the way out, including on panic,
-//! via the `Drop` impl on `XvfbGuard`.
+//! Each Xvfb child is always killed on the way out, including on panic, via
+//! the `Drop` impl on `XvfbGuard`.
 
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use mouseshare_x11input::LocalCursor;
+use x11rb::connection::Connection;
+use x11rb::protocol::xproto::ConnectionExt as _;
 
 /// Owns a running `Xvfb` child process and guarantees it is killed (and
 /// reaped) when dropped, even if the test panics partway through.
@@ -84,6 +91,33 @@ fn wait_for_path(path: &Path, timeout: Duration) -> Option<()> {
     None
 }
 
+/// Connects to `display`, retrying briefly on failure.
+///
+/// `XvfbGuard::spawn` already waits for the display's Unix socket file to
+/// exist before returning, plus a fixed grace sleep -- but that's still a
+/// best-effort heuristic, not a guarantee that Xvfb has finished its startup
+/// far enough to *accept* connections: the socket file can be created
+/// slightly before the server is actually listening on it, and a connect
+/// attempt in that narrow window fails with ECONNRESET/ECONNREFUSED. This
+/// shows up as a genuine (if rare) flake under system load rather than any
+/// bug in `LocalCursor` itself, so the fix belongs here at the test level:
+/// retry the connection itself with a bounded deadline, instead of guessing
+/// a longer fixed sleep that would either not be long enough under worse
+/// load or waste time in the common case.
+fn connect_retrying(display: &str) -> LocalCursor {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match LocalCursor::connect(Some(display)) {
+            Ok(cursor) => return cursor,
+            Err(err) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+                let _ = err;
+            }
+            Err(err) => panic!("failed to connect to {display} after retrying for 5s: {err}"),
+        }
+    }
+}
+
 fn xdotool(display: &str, args: &[&str]) -> String {
     let output = Command::new("xdotool")
         .args(args)
@@ -131,6 +165,65 @@ fn xdotool_mouselocation(display: &str) -> (i32, i32) {
     )
 }
 
+fn xdotool_keydown(display: &str, key: &str) {
+    xdotool(display, &["keydown", "--clearmodifiers", key]);
+}
+
+fn xdotool_keyup(display: &str, key: &str) {
+    xdotool(display, &["keyup", "--clearmodifiers", key]);
+}
+
+/// Runs `xmodmap -pke` against `display` and returns the X11 keycode bound
+/// to the given unshifted keysym name (e.g. `"a"`). This is an
+/// independent (non-`x11rb`, non-`LocalCursor`) way of learning which
+/// keycode a key we ask `xdotool` to press should end up as, so capture
+/// assertions can check the *exact* reported keycode rather than merely
+/// "some nonzero value" -- without hardcoding a keycode number that isn't
+/// guaranteed to hold on every X server's default keymap.
+fn xmodmap_keycode_for(display: &str, keysym_name: &str) -> u8 {
+    let output = Command::new("xmodmap")
+        .arg("-pke")
+        .env("DISPLAY", display)
+        .output()
+        .expect("failed to run xmodmap - is it installed?");
+    assert!(
+        output.status.success(),
+        "xmodmap -pke failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        // Lines look like: "keycode  38 = a A a A"
+        let Some((lhs, rhs)) = line.split_once('=') else {
+            continue;
+        };
+        if rhs.split_whitespace().next() == Some(keysym_name) {
+            let keycode_str = lhs
+                .trim()
+                .strip_prefix("keycode")
+                .expect("xmodmap -pke line should start with 'keycode'")
+                .trim();
+            return keycode_str
+                .parse()
+                .expect("xmodmap keycode column should be numeric");
+        }
+    }
+    panic!("could not find a keycode bound to keysym {keysym_name:?} in `xmodmap -pke` output on {display}");
+}
+
+/// Polls `poll_capture_keys` in a short loop until at least one event has
+/// arrived or `timeout` elapses.
+fn wait_for_keys(cursor: &mut LocalCursor, timeout: Duration) -> Vec<(u8, bool)> {
+    let start = Instant::now();
+    loop {
+        let batch = cursor.poll_capture_keys().expect("poll_capture_keys");
+        if !batch.is_empty() || start.elapsed() > timeout {
+            return batch;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// Polls `poll_capture_delta` in a short loop, accumulating whatever deltas
 /// show up, until either something has arrived and a subsequent poll comes
 /// back empty (i.e. we've drained a settled burst), or `timeout` elapses.
@@ -161,8 +254,7 @@ fn accumulate_deltas(cursor: &mut LocalCursor, timeout: Duration) -> (i32, i32) 
 fn capture_role_reports_correct_deltas() {
     let guard = XvfbGuard::spawn(97, 800, 600);
 
-    let mut cursor =
-        LocalCursor::connect(Some(&guard.display)).expect("connect to capture display");
+    let mut cursor = connect_retrying(&guard.display);
 
     // Sanity check on a fresh Xvfb screen.
     assert_eq!(cursor.screen_size(), (800, 600));
@@ -223,7 +315,7 @@ fn capture_role_reports_correct_deltas() {
 fn poll_capture_delta_does_not_double_count_a_batched_burst() {
     let guard = XvfbGuard::spawn(99, 800, 600);
 
-    let mut cursor = LocalCursor::connect(Some(&guard.display)).expect("connect");
+    let mut cursor = connect_retrying(&guard.display);
     cursor.begin_capture().expect("begin_capture");
     assert_eq!(cursor.query_pointer().unwrap(), (400, 300));
 
@@ -252,7 +344,7 @@ fn poll_capture_delta_does_not_double_count_a_batched_burst() {
 fn inject_role_warps_relative_and_absolute() {
     let guard = XvfbGuard::spawn(98, 800, 600);
 
-    let cursor = LocalCursor::connect(Some(&guard.display)).expect("connect to inject display");
+    let cursor = connect_retrying(&guard.display);
 
     assert_eq!(cursor.screen_size(), (800, 600));
 
@@ -274,4 +366,145 @@ fn inject_role_warps_relative_and_absolute() {
     let (abs_x, abs_y) = cursor.query_pointer().expect("query_pointer after warp_absolute");
     assert_eq!((abs_x, abs_y), (600, 450));
     assert_eq!(xdotool_mouselocation(&guard.display), (600, 450));
+}
+
+/// Exercises the keyboard half of the "capture" role: `begin_capture` grabs
+/// the keyboard (in addition to the pointer, which the other capture test
+/// covers), and `poll_capture_keys` reports real `xdotool keydown`/`keyup`
+/// presses as `(keycode, pressed)` pairs. The expected keycode is looked up
+/// independently via `xmodmap`, not assumed, so this checks the *exact*
+/// keycode, not just "some nonzero value".
+#[test]
+fn keyboard_capture_reports_press_and_release() {
+    let guard = XvfbGuard::spawn(96, 800, 600);
+    let expected_keycode = xmodmap_keycode_for(&guard.display, "a");
+
+    let mut cursor = connect_retrying(&guard.display);
+    cursor.begin_capture().expect("begin_capture");
+
+    xdotool_keydown(&guard.display, "a");
+    let press = wait_for_keys(&mut cursor, Duration::from_secs(2));
+    assert_eq!(
+        press,
+        vec![(expected_keycode, true)],
+        "expected a single press event for keycode {expected_keycode}"
+    );
+
+    xdotool_keyup(&guard.display, "a");
+    let release = wait_for_keys(&mut cursor, Duration::from_secs(2));
+    assert_eq!(
+        release,
+        vec![(expected_keycode, false)],
+        "expected a single release event for keycode {expected_keycode}"
+    );
+
+    cursor.end_capture().expect("end_capture");
+
+    // Symmetric with the pointer-side regression test: after ungrab, the
+    // keyboard is free again. There's no easy behavioral probe for "is the
+    // keyboard still grabbed" without another client, so this just confirms
+    // end_capture() didn't error, which it would if the keyboard grab
+    // established by begin_capture() had never actually taken hold.
+}
+
+/// Regression test for the interleaving hazard fixed by routing both
+/// `poll_capture_delta` and `poll_capture_keys` through one shared drain of
+/// the X connection's event queue: since `poll_for_event` is destructive,
+/// two methods reading the connection independently would have one silently
+/// steal (and drop) events meant for the other, depending on call order.
+/// This drives both a pointer move and a key press before draining either,
+/// polls the pointer side first, and confirms the key event is still there
+/// afterwards.
+#[test]
+fn poll_capture_delta_and_poll_capture_keys_do_not_steal_each_others_events() {
+    let guard = XvfbGuard::spawn(95, 800, 600);
+    let expected_keycode = xmodmap_keycode_for(&guard.display, "b");
+
+    let mut cursor = connect_retrying(&guard.display);
+    cursor.begin_capture().expect("begin_capture");
+
+    xdotool_mousemove(&guard.display, 500, 350);
+    xdotool_keydown(&guard.display, "b");
+    // Give the server a moment to deliver both events before draining.
+    std::thread::sleep(Duration::from_millis(200));
+
+    let deltas = cursor.poll_capture_delta().expect("poll_capture_delta");
+    assert!(
+        !deltas.is_empty(),
+        "expected the mouse move to be reported as a delta"
+    );
+
+    let keys = wait_for_keys(&mut cursor, Duration::from_secs(2));
+    assert_eq!(
+        keys,
+        vec![(expected_keycode, true)],
+        "key event must not be dropped by the preceding poll_capture_delta call"
+    );
+
+    xdotool_keyup(&guard.display, "b");
+    let release = wait_for_keys(&mut cursor, Duration::from_secs(2));
+    assert_eq!(release, vec![(expected_keycode, false)]);
+
+    cursor.end_capture().expect("end_capture");
+}
+
+/// Exercises key *injection* via `inject_key` (XTest `FakeInput`), verified
+/// with the core `QueryKeymap` request on a second, independent connection
+/// to the same display -- this sidesteps needing a window manager or a
+/// focused text-input widget, neither of which Xvfb provides.
+#[test]
+fn inject_key_sets_and_clears_query_keymap_bit() {
+    let guard = XvfbGuard::spawn(94, 800, 600);
+
+    let cursor = connect_retrying(&guard.display);
+
+    // A second connection used purely to observe server-side key state; it
+    // doesn't go through LocalCursor because QueryKeymap is a test-only
+    // verification tool here, not part of the crate's public API surface.
+    let (keymap_conn, _) =
+        x11rb::connect(Some(&guard.display)).expect("second connection for QueryKeymap");
+    // The connection setup always reports a valid min_keycode (traditionally
+    // 8; keycodes below that are reserved), so this is guaranteed in-range
+    // for XTest's FakeInput without needing to look up any specific key.
+    let keycode = keymap_conn.setup().min_keycode;
+
+    let is_down = |code: u8| -> bool {
+        let reply = keymap_conn
+            .query_keymap()
+            .expect("query_keymap request")
+            .reply()
+            .expect("query_keymap reply");
+        let byte = reply.keys[(code / 8) as usize];
+        (byte & (1 << (code % 8))) != 0
+    };
+
+    assert!(!is_down(keycode), "keycode {keycode} should start up");
+
+    cursor.inject_key(keycode, true).expect("inject_key press");
+    let mut seen_down = false;
+    for _ in 0..50 {
+        if is_down(keycode) {
+            seen_down = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        seen_down,
+        "keycode {keycode} should be down after inject_key(_, true)"
+    );
+
+    cursor.inject_key(keycode, false).expect("inject_key release");
+    let mut seen_up = false;
+    for _ in 0..50 {
+        if !is_down(keycode) {
+            seen_up = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        seen_up,
+        "keycode {keycode} should be up after inject_key(_, false)"
+    );
 }

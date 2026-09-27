@@ -7,12 +7,35 @@ machine over the network.
 
 ## Status
 
-MVP in progress: two machines, mouse-only, Linux X11 only, manual IP
-config (no mDNS discovery, no encryption yet). See the requirements
-analysis this project started from for the full phased roadmap
-(keyboard sharing, mDNS discovery, auth/encryption, multi-monitor DPI
-handling, Wayland support, clipboard/file transfer) — those are
-deliberately out of scope for this first pass.
+MVP working end-to-end: two machines, mouse-only, Linux X11 only, manual
+IP config (no mDNS discovery, no encryption yet). Verified against two
+real headless X servers (see `tests/e2e.rs`) — edge detection, capture,
+network forwarding, injection, and handoff back to local all work
+together, not just in isolation. See the requirements analysis this
+project started from for the full phased roadmap (keyboard sharing, mDNS
+discovery, auth/encryption, multi-monitor DPI handling, Wayland support,
+clipboard/file transfer) — those are deliberately out of scope for this
+first pass.
+
+## Running it manually
+
+On the target machine (the one that will receive forwarded mouse
+movement — copy `layout.example.toml`, set `local_id` to that machine's
+screen id):
+
+```bash
+mouseshare --config layout.toml target --listen 0.0.0.0:7878
+```
+
+On the controller machine (the one with the physical mouse; same layout
+file, `local_id` set to its own screen id):
+
+```bash
+mouseshare --config layout.toml controller --connect <target-ip>:7878
+```
+
+Move the mouse into the edge of the controller's screen that borders the
+target's screen in the layout config, and control hands off.
 
 ## Layout
 
@@ -50,6 +73,7 @@ cursor gets stuck at the wall instead of crossing over).
 cargo test --workspace
 ```
 
-The `x11input` crate's integration test spins up its own throwaway Xvfb
-instances, so it needs `Xvfb` and `xdotool` installed but not a real
-display.
+The `x11input` crate's tests and the root `tests/e2e.rs` (which runs the
+actual compiled binary as both a controller and a target against two
+throwaway Xvfb instances) need `Xvfb` and `xdotool` installed, but not a
+real display.

@@ -12,10 +12,20 @@ mouseshare-protocol = { path = "crates/protocol" }
 mouseshare-layout = { path = "crates/layout" }
 mouseshare-net = { path = "crates/net" }
 mouseshare-x11input = { path = "crates/x11input" }
-tokio = { version = "1", features = ["full"] }
-clap = { version = "4", features = ["derive"] }
+# Single-threaded runtime: this app is one connection, polled at a fixed
+# tick rate, not a concurrent server -- a thread pool would just be idle
+# threads sitting in memory for no benefit.
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 anyhow = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

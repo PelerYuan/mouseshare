@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use mouseshare_discovery::Announcement;
 use mouseshare_layout::{ControlState, EdgeDetector, LayoutConfig};
 use mouseshare_net::{Connection, NetError};
 use mouseshare_protocol::Message;
@@ -14,6 +15,10 @@ const REENTRY_MARGIN: i32 = 4;
 
 /// Poll interval for the controller's local-position/capture-delta loop.
 const TICK: Duration = Duration::from_millis(8);
+
+/// How long the controller waits for mDNS replies before giving up, when
+/// `--connect` wasn't given and it has to auto-discover the target.
+const DEFAULT_DISCOVER_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Parser)]
 #[command(name = "mouseshare", about = "LAN mouse sharing (MVP: mouse-only, X11)")]
@@ -30,9 +35,16 @@ struct Cli {
 enum Role {
     /// Runs on the machine that owns the physical mouse.
     Controller {
-        /// Address of the target machine, e.g. 192.168.1.20:7878
+        /// Address of the target machine, e.g. 192.168.1.20:7878. If
+        /// omitted, the target is auto-discovered on the LAN via mDNS
+        /// instead (it must be the other screen configured in --config).
         #[arg(long)]
-        connect: SocketAddr,
+        connect: Option<SocketAddr>,
+
+        /// How long to wait for mDNS replies when auto-discovering (only
+        /// used when --connect is omitted).
+        #[arg(long, default_value_t = DEFAULT_DISCOVER_TIMEOUT.as_secs())]
+        discover_timeout_secs: u64,
     },
     /// Runs on the machine that receives forwarded mouse movement.
     Target {
@@ -49,15 +61,74 @@ async fn main() -> anyhow::Result<()> {
     let layout = LayoutConfig::from_toml_file(&cli.config)?;
 
     match cli.role {
-        Role::Controller { connect } => run_controller(layout, connect).await,
+        Role::Controller {
+            connect,
+            discover_timeout_secs,
+        } => {
+            let timeout = Duration::from_secs(discover_timeout_secs);
+            let target_addr = resolve_target_addr(&layout, connect, timeout).await?;
+            run_controller(layout, target_addr).await
+        }
         Role::Target { listen } => run_target(layout, listen).await,
     }
+}
+
+/// Returns `connect` unchanged if given, otherwise browses the LAN via mDNS
+/// for a mouseshare target announcing the layout's other configured screen.
+async fn resolve_target_addr(
+    layout: &LayoutConfig,
+    connect: Option<SocketAddr>,
+    timeout: Duration,
+) -> anyhow::Result<SocketAddr> {
+    if let Some(addr) = connect {
+        return Ok(addr);
+    }
+
+    // MVP is single-peer: the only sensible auto-discovery target is
+    // whichever other screen this layout has configured alongside the
+    // local one.
+    let remote_id = layout
+        .screens
+        .iter()
+        .map(|s| s.id.clone())
+        .find(|id| *id != layout.local_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--connect was omitted but the layout config has no other screen to discover"
+            )
+        })?;
+
+    tracing::info!(screen_id = %remote_id, ?timeout, "no --connect given; discovering target via mDNS");
+    let peers = tokio::task::spawn_blocking(move || mouseshare_discovery::discover(timeout)).await??;
+    peers
+        .into_iter()
+        .find(|p| p.screen_id == remote_id)
+        .map(|p| p.addr)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no mouseshare target announcing screen_id {remote_id:?} was found on the LAN within {timeout:?}"
+            )
+        })
 }
 
 async fn run_target(layout: LayoutConfig, listen_addr: SocketAddr) -> anyhow::Result<()> {
     let local = layout.local_screen().clone();
     let listener = mouseshare_net::listen(listen_addr).await?;
-    tracing::info!(addr = %listener.local_addr()?, "target listening");
+    let bound_addr = listener.local_addr()?;
+    tracing::info!(addr = %bound_addr, "target listening");
+
+    // Kept alive for the lifetime of the target process: dropping it would
+    // send an mDNS goodbye and stop controllers from finding us.
+    let _announcement = match Announcement::start(&local.id, bound_addr.port()) {
+        Ok(a) => Some(a),
+        Err(e) => {
+            tracing::warn!(
+                "mDNS announcement failed ({e}); target is still reachable via --connect, \
+                 just not auto-discoverable"
+            );
+            None
+        }
+    };
 
     loop {
         let mut conn = listener.accept().await?;
@@ -98,6 +169,11 @@ async fn handle_target_connection(
                     tracing::warn!("warp_relative failed: {e}");
                 }
             }
+            Ok(Message::KeyEvent { keycode, pressed }) => {
+                if let Err(e) = cursor.inject_key(keycode, pressed) {
+                    tracing::warn!("inject_key failed: {e}");
+                }
+            }
             Ok(Message::Heartbeat) => {}
             Ok(other) => tracing::warn!(?other, "unexpected message from controller"),
             Err(NetError::ConnectionClosed) => return Ok(()),
@@ -135,6 +211,7 @@ async fn run_controller(layout: LayoutConfig, target_addr: SocketAddr) -> anyhow
                 }
             }
             ControlState::Remote(_) => {
+                let mut still_remote = true;
                 for (dx, dy) in cursor.poll_capture_delta()? {
                     match detector.on_remote_delta(dx, dy) {
                         None => {
@@ -155,6 +232,7 @@ async fn run_controller(layout: LayoutConfig, target_addr: SocketAddr) -> anyhow
                                 cursor.warp_absolute(lx, ly)?;
                             }
                             tracing::info!("control returned to local");
+                            still_remote = false;
                             break;
                         }
                         Some(transition) => {
@@ -164,6 +242,14 @@ async fn run_controller(layout: LayoutConfig, target_addr: SocketAddr) -> anyhow
                                  (single-peer MVP); dropping this delta"
                             );
                         }
+                    }
+                }
+                // Only poll for keys if capture is still active: if the loop
+                // above just ended it (control returned to local), the
+                // keyboard grab is already released.
+                if still_remote {
+                    for (keycode, pressed) in cursor.poll_capture_keys()? {
+                        conn.send(&Message::KeyEvent { keycode, pressed }).await?;
                     }
                 }
             }

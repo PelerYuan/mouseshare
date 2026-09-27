@@ -238,6 +238,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "mouseshare-discovery",
  "mouseshare-layout",
  "mouseshare-net",
  "mouseshare-protocol",
@@ -247,6 +248,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "x11rb",
 ]
 
 [[package]]

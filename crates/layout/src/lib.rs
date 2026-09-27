@@ -145,10 +145,32 @@ impl EdgeDetector {
 
     /// Feed an absolute local-screen cursor position while `state()` is
     /// `Local`. Returns `Some` when control should hand off to a neighbor.
+    ///
+    /// A real OS cursor is clamped by the display server to
+    /// `[0, width-1] x [0, height-1]` and can never actually be reported
+    /// *beyond* the screen — so resting at the boundary pixel is the
+    /// strongest signal a real caller can ever give us that the user is
+    /// trying to leave in that direction. Treat it as having already
+    /// crossed one pixel past the edge (into whatever neighbor is
+    /// configured there, if any) rather than requiring a position that a
+    /// real query_pointer() could never produce.
     pub fn on_local_move(&mut self, local_x: i32, local_y: i32) -> Option<Transition> {
         debug_assert_eq!(self.state, ControlState::Local);
         let local = self.layout.local_screen().clone();
-        let (vx, vy) = (local.x + local_x, local.y + local_y);
+        let vx = if local_x <= 0 {
+            local.x - 1
+        } else if local_x >= local.width - 1 {
+            local.x + local.width
+        } else {
+            local.x + local_x
+        };
+        let vy = if local_y <= 0 {
+            local.y - 1
+        } else if local_y >= local.height - 1 {
+            local.y + local.height
+        } else {
+            local.y + local_y
+        };
         self.virtual_pos = (vx, vy);
         if local.contains(vx, vy) {
             return None;
@@ -289,10 +311,19 @@ mod tests {
     #[test]
     fn crosses_right_edge_into_neighbor() {
         let mut d = EdgeDetector::new(two_screen_layout(), 2);
-        // Screen A is 1000 wide; x=1000 is already off A's right edge.
-        let t = d.on_local_move(1000, 400).expect("should hand off");
+        // Screen A is 1000 wide; a real cursor can be reported at x=999
+        // (the last valid pixel) but never at x=1000 or beyond, since the
+        // display server itself clamps it there.
+        let t = d.on_local_move(999, 400).expect("should hand off");
         assert_eq!(t.new_state, ControlState::Remote("B".into()));
         assert_eq!(*d.state(), ControlState::Remote("B".into()));
+    }
+
+    #[test]
+    fn does_not_cross_one_pixel_before_the_edge() {
+        let mut d = EdgeDetector::new(two_screen_layout(), 2);
+        assert_eq!(d.on_local_move(998, 400), None);
+        assert_eq!(*d.state(), ControlState::Local);
     }
 
     #[test]
@@ -307,7 +338,7 @@ mod tests {
     #[test]
     fn remote_delta_returns_to_local_with_margin() {
         let mut d = EdgeDetector::new(two_screen_layout(), 5);
-        d.on_local_move(1000, 400).unwrap(); // hand off to B, virtual_pos = (1000, 400)
+        d.on_local_move(999, 400).unwrap(); // hand off to B, virtual_pos = (1000, 400)
         // Small negative delta stays within the margin around B's left edge.
         assert_eq!(d.on_remote_delta(-3, 0), None);
         assert_eq!(*d.state(), ControlState::Remote("B".into()));
@@ -321,7 +352,7 @@ mod tests {
     #[test]
     fn remote_delta_clamps_at_far_wall() {
         let mut d = EdgeDetector::new(two_screen_layout(), 2);
-        d.on_local_move(1000, 400).unwrap();
+        d.on_local_move(999, 400).unwrap();
         assert_eq!(d.on_remote_delta(5000, 0), None);
         assert_eq!(*d.state(), ControlState::Remote("B".into()));
         assert_eq!(d.virtual_pos(), (1999, 400));

@@ -1,0 +1,13 @@
+[package]
+name = "mouseshare-net"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mouseshare-protocol = { path = "../protocol" }
+tokio = { version = "1", features = ["full"] }
+thiserror = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

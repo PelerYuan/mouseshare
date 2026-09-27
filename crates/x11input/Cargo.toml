@@ -1,0 +1,9 @@
+[package]
+name = "mouseshare-x11input"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+x11rb = { version = "0.13", features = ["xtest"] }
+thiserror = "1"
+tracing = "0.1"

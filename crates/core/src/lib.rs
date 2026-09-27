@@ -10,13 +10,13 @@
 //! panel) without this crate needing to know about it.
 
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mouseshare_discovery::Announcement;
 use mouseshare_layout::{ControlState, EdgeDetector, LayoutConfig};
 use mouseshare_net::{Connection, NetError};
 use mouseshare_protocol::Message;
-use mouseshare_x11input::LocalCursor;
+use mouseshare_x11input::{Clipboard, LocalCursor};
 
 /// Pixels of hysteresis applied when control might return from a remote
 /// screen to local, to avoid flicker right at the seam.
@@ -24,6 +24,26 @@ const REENTRY_MARGIN: i32 = 4;
 
 /// Poll interval for the controller's local-position/capture-delta loop.
 const TICK: Duration = Duration::from_millis(8);
+
+/// How often each side checks whether its own clipboard changed. Coarser
+/// than `TICK` on purpose -- clipboard sync has no latency requirement even
+/// close to mouse motion's, and polling `GetSelectionOwner` is a local X
+/// round trip that's wasteful to repeat 125 times a second for no reason.
+const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(300);
+
+/// Aborts the wrapped task when dropped. Used to make sure the background
+/// task that owns a connection's read half never outlives the loop that
+/// owns its write half -- on every exit path, including the *outer*
+/// `run_controller`/`run_target` future itself being aborted (e.g. a GUI's
+/// Stop button), not just a normal `return`. A bare `JoinHandle` wouldn't
+/// do this: dropping it only detaches the task, it doesn't stop it.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// How long a caller should wait for mDNS replies before giving up, when
 /// auto-discovering a target instead of dialing a known address.
@@ -69,7 +89,8 @@ pub async fn resolve_target_addr(
 
 /// Runs the target role forever: listens for controller connections,
 /// applies received `MouseMove`/`KeyEvent` messages to the local X server,
-/// and announces itself over mDNS so controllers can auto-discover it.
+/// syncs the clipboard in both directions, and announces itself over mDNS
+/// so controllers can auto-discover it.
 ///
 /// Only returns on an unrecoverable error (e.g. failing to bind
 /// `listen_addr`); per-connection errors are logged and the loop continues
@@ -114,33 +135,97 @@ pub async fn run_target(layout: LayoutConfig, listen_addr: SocketAddr) -> anyhow
                 continue;
             }
         };
+        let clipboard = match Clipboard::connect(None) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!("clipboard sync unavailable ({e}); continuing without it");
+                None
+            }
+        };
 
-        if let Err(e) = handle_target_connection(&mut conn, &cursor).await {
+        if let Err(e) = handle_target_connection(conn, &cursor, clipboard).await {
             tracing::warn!("controller connection ended: {e}");
         }
     }
 }
 
-async fn handle_target_connection(
-    conn: &mut Connection,
-    cursor: &LocalCursor,
-) -> Result<(), NetError> {
+/// Forwards messages arriving on `reader` to `tx`, ending the loop (and
+/// sending the terminal error) once the connection closes or breaks.
+/// Runs as its own task so the main per-connection loop below never has to
+/// race a raw socket read inside `select!` -- see the cancellation-safety
+/// note on `mouseshare_net::Connection::recv`.
+async fn forward_incoming(
+    mut reader: mouseshare_net::ConnReader,
+    tx: tokio::sync::mpsc::UnboundedSender<Result<Message, NetError>>,
+) {
     loop {
-        match conn.recv().await {
-            Ok(Message::MouseMove { dx, dy }) => {
-                if let Err(e) = cursor.warp_relative(dx, dy) {
-                    tracing::warn!("warp_relative failed: {e}");
+        let result = reader.recv().await;
+        let is_err = result.is_err();
+        if tx.send(result).is_err() || is_err {
+            return;
+        }
+    }
+}
+
+async fn handle_target_connection(
+    conn: Connection,
+    cursor: &LocalCursor,
+    mut clipboard: Option<Clipboard>,
+) -> Result<(), NetError> {
+    let (reader, mut writer) = conn.into_split();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let _reader_guard = AbortOnDrop(tokio::spawn(forward_incoming(reader, tx)));
+
+    let mut clipboard_tick = tokio::time::interval(CLIPBOARD_POLL_INTERVAL);
+    clipboard_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            msg = rx.recv() => {
+                match msg {
+                    Some(Ok(Message::MouseMove { dx, dy })) => {
+                        if let Err(e) = cursor.warp_relative(dx, dy) {
+                            tracing::warn!("warp_relative failed: {e}");
+                        }
+                    }
+                    Some(Ok(Message::KeyEvent { keycode, pressed })) => {
+                        if let Err(e) = cursor.inject_key(keycode, pressed) {
+                            tracing::warn!("inject_key failed: {e}");
+                        }
+                    }
+                    Some(Ok(Message::ClipboardText(text))) => {
+                        if let Some(clipboard) = clipboard.as_mut() {
+                            // Logged by length, not content: clipboard text
+                            // can be sensitive (passwords, etc).
+                            let bytes = text.len();
+                            match clipboard.set_text(text) {
+                                Ok(()) => tracing::info!(bytes, "clipboard updated from controller"),
+                                Err(e) => tracing::warn!("failed to apply clipboard update: {e}"),
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Heartbeat)) => {}
+                    Some(Ok(other)) => tracing::warn!(?other, "unexpected message from controller"),
+                    Some(Err(NetError::ConnectionClosed)) => return Ok(()),
+                    Some(Err(e)) => return Err(e),
+                    // The reader task always sends a terminal Err before
+                    // ending, so a closed channel with nothing received
+                    // means it was aborted/dropped, not a clean close.
+                    None => return Ok(()),
                 }
             }
-            Ok(Message::KeyEvent { keycode, pressed }) => {
-                if let Err(e) = cursor.inject_key(keycode, pressed) {
-                    tracing::warn!("inject_key failed: {e}");
+            _ = clipboard_tick.tick() => {
+                if let Some(clipboard) = clipboard.as_mut() {
+                    match clipboard.poll() {
+                        Ok(Some(text)) => {
+                            tracing::info!(bytes = text.len(), "sending local clipboard change to controller");
+                            writer.send(&Message::ClipboardText(text)).await?;
+                        }
+                        Ok(None) => {}
+                        Err(e) => tracing::warn!("clipboard poll failed: {e}"),
+                    }
                 }
             }
-            Ok(Message::Heartbeat) => {}
-            Ok(other) => tracing::warn!(?other, "unexpected message from controller"),
-            Err(NetError::ConnectionClosed) => return Ok(()),
-            Err(e) => return Err(e),
         }
     }
 }
@@ -148,7 +233,8 @@ async fn handle_target_connection(
 /// Runs the controller role forever: connects to `target_addr`, then polls
 /// the local cursor position/capture deltas at a fixed tick rate, handing
 /// mouse and keyboard control off to the target and back based on
-/// `mouseshare_layout::EdgeDetector`.
+/// `mouseshare_layout::EdgeDetector`. Clipboard sync runs alongside this,
+/// independent of which side currently has control.
 ///
 /// Only returns on an unrecoverable error (failing to connect, a fatal X11
 /// or network error).
@@ -161,8 +247,21 @@ pub async fn run_controller(layout: LayoutConfig, target_addr: SocketAddr) -> an
         .await?;
     tracing::info!(?peer, "connected to target");
 
+    let (reader, mut writer) = conn.into_split();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let _reader_guard = AbortOnDrop(tokio::spawn(forward_incoming(reader, tx)));
+
     let mut cursor = LocalCursor::connect(None)?;
     let mut detector = EdgeDetector::new(layout, REENTRY_MARGIN);
+
+    let mut clipboard = match Clipboard::connect(None) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!("clipboard sync unavailable ({e}); continuing without it");
+            None
+        }
+    };
+    let mut next_clipboard_poll = Instant::now();
 
     loop {
         match detector.state().clone() {
@@ -185,7 +284,7 @@ pub async fn run_controller(layout: LayoutConfig, target_addr: SocketAddr) -> an
                 for (dx, dy) in cursor.poll_capture_delta()? {
                     match detector.on_remote_delta(dx, dy) {
                         None => {
-                            conn.send(&Message::MouseMove { dx, dy }).await?;
+                            writer.send(&Message::MouseMove { dx, dy }).await?;
                         }
                         Some(transition) if transition.new_state == ControlState::Local => {
                             // This delta is the one that crossed back onto
@@ -219,11 +318,48 @@ pub async fn run_controller(layout: LayoutConfig, target_addr: SocketAddr) -> an
                 // keyboard grab is already released.
                 if still_remote {
                     for (keycode, pressed) in cursor.poll_capture_keys()? {
-                        conn.send(&Message::KeyEvent { keycode, pressed }).await?;
+                        writer.send(&Message::KeyEvent { keycode, pressed }).await?;
                     }
                 }
             }
         }
+
+        loop {
+            match rx.try_recv() {
+                Ok(Ok(Message::ClipboardText(text))) => {
+                    if let Some(clipboard) = clipboard.as_mut() {
+                        let bytes = text.len();
+                        match clipboard.set_text(text) {
+                            Ok(()) => tracing::info!(bytes, "clipboard updated from target"),
+                            Err(e) => tracing::warn!("failed to apply clipboard update: {e}"),
+                        }
+                    }
+                }
+                Ok(Ok(Message::Heartbeat)) => {}
+                Ok(Ok(other)) => tracing::warn!(?other, "unexpected message from target"),
+                Ok(Err(NetError::ConnectionClosed)) => return Ok(()),
+                Ok(Err(e)) => return Err(e.into()),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                // Reader task always sends a terminal Err before its loop
+                // ends, so this means it was aborted/dropped instead.
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+
+        if let Some(clipboard) = clipboard.as_mut() {
+            if Instant::now() >= next_clipboard_poll {
+                next_clipboard_poll = Instant::now() + CLIPBOARD_POLL_INTERVAL;
+                match clipboard.poll() {
+                    Ok(Some(text)) => {
+                        tracing::info!(bytes = text.len(), "sending local clipboard change to target");
+                        writer.send(&Message::ClipboardText(text)).await?;
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("clipboard poll failed: {e}"),
+                }
+            }
+        }
+
         tokio::time::sleep(TICK).await;
     }
 }

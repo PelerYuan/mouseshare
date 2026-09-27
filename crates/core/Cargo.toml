@@ -9,6 +9,6 @@ mouseshare-layout = { path = "../layout" }
 mouseshare-net = { path = "../net" }
 mouseshare-x11input = { path = "../x11input" }
 mouseshare-discovery = { path = "../discovery" }
-tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "time", "sync"] }
 tracing = "0.1"
 anyhow = "1"

@@ -33,6 +33,10 @@ pub enum Message {
         keycode: u8,
         pressed: bool,
     },
+    /// The sender's clipboard changed to this plain-text content. Sent in
+    /// either direction, independent of which side currently has mouse/
+    /// keyboard control -- clipboard sync isn't gated by `ControlState`.
+    ClipboardText(String),
     Heartbeat,
 }
 
@@ -88,6 +92,7 @@ mod tests {
             Message::MouseMove { dx: -5, dy: 12 },
             Message::KeyEvent { keycode: 38, pressed: true },
             Message::KeyEvent { keycode: 38, pressed: false },
+            Message::ClipboardText("hello, clipboard".to_string()),
             Message::Heartbeat,
         ];
         for msg in messages {

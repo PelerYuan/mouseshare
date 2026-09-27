@@ -11,7 +11,8 @@
 use std::net::SocketAddr;
 
 use mouseshare_protocol::{decode_body, encode_frame, Message, ProtocolError, MAX_FRAME_LEN, PROTOCOL_VERSION};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 
 /// Errors that can occur while establishing or using a [`Connection`].
@@ -78,54 +79,24 @@ impl Connection {
 
     /// Encodes and writes one message to the peer.
     pub async fn send(&mut self, msg: &Message) -> Result<(), NetError> {
-        let framed = encode_frame(msg)?;
-        self.stream.write_all(&framed).await?;
-        Ok(())
+        send_to(&mut self.stream, msg).await
     }
 
-    /// Reads one length-prefixed message from the peer.
-    ///
-    /// Validates the length prefix against `MAX_FRAME_LEN` before
-    /// allocating a buffer for the body, so a corrupt or malicious prefix
-    /// can't force an unbounded allocation.
-    ///
-    /// Not cancellation-safe: this method internally performs two
-    /// `read_exact` calls (one for the 4-byte length prefix, one for the
-    /// body), and `AsyncReadExt::read_exact` is documented as not being
-    /// cancel-safe. If this future is dropped mid-read (e.g. it lost a
-    /// `tokio::select!` race), any bytes already read for the current
-    /// frame are discarded but the connection's read position on the wire
-    /// has still moved forward, desynchronizing subsequent framing. Do not
-    /// use `recv()` as a branch in `select!` that might be cancelled;
-    /// either give it its own dedicated task/loop or make sure the other
-    /// branches can't fire once a `recv()` is in flight.
+    /// Reads one length-prefixed message from the peer. See the
+    /// cancellation-safety note on the free function [`recv_from`], which
+    /// this delegates to.
     pub async fn recv(&mut self) -> Result<Message, NetError> {
-        let mut len_buf = [0u8; 4];
-        self.read_exact_or_eof(&mut len_buf).await?;
-        let len = u32::from_be_bytes(len_buf);
-        if len > MAX_FRAME_LEN {
-            return Err(NetError::FrameTooLarge {
-                len,
-                max: MAX_FRAME_LEN,
-            });
-        }
-
-        let mut body = vec![0u8; len as usize];
-        self.read_exact_or_eof(&mut body).await?;
-        let msg = decode_body(&body)?;
-        Ok(msg)
+        recv_from(&mut self.stream).await
     }
 
-    /// Like `AsyncReadExt::read_exact`, but maps a clean or mid-frame EOF
-    /// to `NetError::ConnectionClosed` instead of a generic IO error.
-    async fn read_exact_or_eof(&mut self, buf: &mut [u8]) -> Result<(), NetError> {
-        match self.stream.read_exact(buf).await {
-            Ok(_) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                Err(NetError::ConnectionClosed)
-            }
-            Err(e) => Err(NetError::Io(e)),
-        }
+    /// Splits into independent read/write halves backed by the same TCP
+    /// connection, so one task can own [`ConnReader::recv`] in a plain loop
+    /// while another independently owns [`ConnWriter::send`] -- avoids the
+    /// cancellation hazard documented on `recv()`/[`recv_from`] entirely,
+    /// rather than working around it with `select!`.
+    pub fn into_split(self) -> (ConnReader, ConnWriter) {
+        let (read_half, write_half) = self.stream.into_split();
+        (ConnReader { stream: read_half }, ConnWriter { stream: write_half })
     }
 
     /// Performs the handshake as the side that initiated the TCP
@@ -263,4 +234,77 @@ pub async fn listen(addr: SocketAddr) -> Result<Listener, NetError> {
 pub async fn connect(addr: SocketAddr) -> Result<Connection, NetError> {
     let stream = TcpStream::connect(addr).await?;
     Connection::new(stream)
+}
+
+/// The read half of a [`Connection`] split via [`Connection::into_split`].
+/// Meant to be owned by a single dedicated task looping on `recv()` — see
+/// the cancellation-safety note on [`recv_from`].
+pub struct ConnReader {
+    stream: OwnedReadHalf,
+}
+
+impl ConnReader {
+    pub async fn recv(&mut self) -> Result<Message, NetError> {
+        recv_from(&mut self.stream).await
+    }
+}
+
+/// The write half of a [`Connection`] split via [`Connection::into_split`].
+pub struct ConnWriter {
+    stream: OwnedWriteHalf,
+}
+
+impl ConnWriter {
+    pub async fn send(&mut self, msg: &Message) -> Result<(), NetError> {
+        send_to(&mut self.stream, msg).await
+    }
+}
+
+async fn send_to<W: AsyncWrite + Unpin>(stream: &mut W, msg: &Message) -> Result<(), NetError> {
+    let framed = encode_frame(msg)?;
+    stream.write_all(&framed).await?;
+    Ok(())
+}
+
+/// Reads one length-prefixed message from `stream`.
+///
+/// Validates the length prefix against `MAX_FRAME_LEN` before allocating a
+/// buffer for the body, so a corrupt or malicious prefix can't force an
+/// unbounded allocation.
+///
+/// Not cancellation-safe: this internally performs two `read_exact` calls
+/// (one for the 4-byte length prefix, one for the body), and
+/// `AsyncReadExt::read_exact` is documented as not being cancel-safe. If
+/// this future is dropped mid-read (e.g. it lost a `tokio::select!` race),
+/// any bytes already read for the current frame are discarded but the
+/// connection's read position on the wire has still moved forward,
+/// desynchronizing subsequent framing. Do not call this as a branch in
+/// `select!` that might be cancelled; either give it its own dedicated
+/// task/loop (as [`ConnReader`] is meant to be used) or make sure the other
+/// branches can't fire once a call is in flight.
+async fn recv_from<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Message, NetError> {
+    let mut len_buf = [0u8; 4];
+    read_exact_or_eof(stream, &mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf);
+    if len > MAX_FRAME_LEN {
+        return Err(NetError::FrameTooLarge {
+            len,
+            max: MAX_FRAME_LEN,
+        });
+    }
+
+    let mut body = vec![0u8; len as usize];
+    read_exact_or_eof(stream, &mut body).await?;
+    let msg = decode_body(&body)?;
+    Ok(msg)
+}
+
+/// Like `AsyncReadExt::read_exact`, but maps a clean or mid-frame EOF to
+/// `NetError::ConnectionClosed` instead of a generic IO error.
+async fn read_exact_or_eof<R: AsyncRead + Unpin>(stream: &mut R, buf: &mut [u8]) -> Result<(), NetError> {
+    match stream.read_exact(buf).await {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Err(NetError::ConnectionClosed),
+        Err(e) => Err(NetError::Io(e)),
+    }
 }

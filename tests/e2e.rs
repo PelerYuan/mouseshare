@@ -385,6 +385,115 @@ fn keyboard_events_are_forwarded_while_remote() {
     drop(target);
 }
 
+fn xclip_copy(display: &str, text: &str) {
+    let mut child = Command::new("xclip")
+        .args(["-i", "-selection", "clipboard"])
+        .env("DISPLAY", display)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("failed to run xclip -i - is it installed?");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(text.as_bytes())
+        .expect("write to xclip stdin");
+    let status = child.wait().expect("wait for xclip -i");
+    assert!(status.success(), "xclip -i exited with {status}");
+}
+
+/// Runs `xclip -o` and returns its stdout, or `None` if it didn't produce
+/// the expected owner within `timeout` (e.g. nothing owns the selection
+/// yet). Retries because propagation across the network + the other side's
+/// `CLIPBOARD_POLL_INTERVAL` isn't instant.
+fn xclip_paste_eventually(display: &str, expected: &str, timeout: Duration) -> Option<String> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let output = Command::new("xclip")
+            .args(["-o", "-selection", "clipboard"])
+            .env("DISPLAY", display)
+            .output()
+            .expect("failed to run xclip -o - is it installed?");
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout).to_string();
+            if text == expected {
+                return Some(text);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    None
+}
+
+/// Proves clipboard sync is actually wired end-to-end through `main.rs` and
+/// `mouseshare-core`, not just implemented in `mouseshare-x11input` in
+/// isolation: text copied with `xclip` on one real (headless) X server
+/// should become readable via `xclip -o` on the other, in both directions,
+/// via the real compiled binaries talking over a real TCP connection --
+/// independent of which side currently holds mouse/keyboard control.
+#[test]
+fn clipboard_syncs_bidirectionally_between_two_real_processes() {
+    let display_a = XvfbGuard::spawn(201, 800, 600);
+    let display_b = XvfbGuard::spawn(202, 800, 600);
+
+    let tmp = std::env::temp_dir().join(format!("mouseshare-e2e-clip-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let layout_a = write_layout(&tmp, "a.toml", "A");
+    let layout_b = write_layout(&tmp, "b.toml", "B");
+
+    let port = free_port();
+    let bin = env!("CARGO_BIN_EXE_mouseshare");
+
+    let target = ChildGuard(
+        Command::new(bin)
+            .args([
+                "--config",
+                layout_b.to_str().unwrap(),
+                "target",
+                "--listen",
+                &format!("127.0.0.1:{port}"),
+            ])
+            .env("DISPLAY", &display_b.display)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn target"),
+    );
+    std::thread::sleep(Duration::from_millis(500));
+
+    let controller = ChildGuard(
+        Command::new(bin)
+            .args([
+                "--config",
+                layout_a.to_str().unwrap(),
+                "controller",
+                "--connect",
+                &format!("127.0.0.1:{port}"),
+            ])
+            .env("DISPLAY", &display_a.display)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn controller"),
+    );
+    std::thread::sleep(Duration::from_millis(800));
+
+    // A -> B: copy on the controller's display, read back on the target's.
+    xclip_copy(&display_a.display, "from A to B");
+    let seen = xclip_paste_eventually(&display_b.display, "from A to B", Duration::from_secs(5));
+    assert_eq!(seen.as_deref(), Some("from A to B"), "B should see A's clipboard update");
+
+    // B -> A: the reverse direction, proving sync isn't one-way and isn't
+    // gated by which side currently owns mouse/keyboard control (neither
+    // process has been driven to hand off control in this test at all).
+    xclip_copy(&display_b.display, "from B to A");
+    let seen = xclip_paste_eventually(&display_a.display, "from B to A", Duration::from_secs(5));
+    assert_eq!(seen.as_deref(), Some("from B to A"), "A should see B's clipboard update");
+
+    drop(controller);
+    drop(target);
+}
+
 /// Proves `mouseshare-discovery` is actually wired into main.rs: run a
 /// target with no explicit port shared out-of-band and a controller with no
 /// `--connect` at all, relying purely on mDNS to find each other, then

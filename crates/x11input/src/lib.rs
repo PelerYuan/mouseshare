@@ -27,6 +27,13 @@
 //!
 //! See the crate-level tests in `tests/` for an end-to-end exercise of both
 //! roles against real (headless) `Xvfb` servers.
+//!
+//! A third, independent concern lives here too: [`clipboard::Clipboard`]
+//! syncs the X11 `CLIPBOARD` selection (plain text only) via ICCCM
+//! selection ownership, unrelated to pointer/keyboard capture.
+
+mod clipboard;
+pub use clipboard::Clipboard;
 
 use x11rb::connection::Connection;
 use x11rb::errors::{ConnectError, ConnectionError, ReplyError, ReplyOrIdError};

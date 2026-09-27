@@ -238,17 +238,28 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "mouseshare-discovery",
+ "mouseshare-core",
  "mouseshare-layout",
- "mouseshare-net",
- "mouseshare-protocol",
- "mouseshare-x11input",
  "serde",
  "tokio",
  "toml",
  "tracing",
  "tracing-subscriber",
  "x11rb",
+]
+
+[[package]]
+name = "mouseshare-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mouseshare-discovery",
+ "mouseshare-layout",
+ "mouseshare-net",
+ "mouseshare-protocol",
+ "mouseshare-x11input",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

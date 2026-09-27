@@ -8,15 +8,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-mouseshare-protocol = { path = "crates/protocol" }
+mouseshare-core = { path = "crates/core" }
 mouseshare-layout = { path = "crates/layout" }
-mouseshare-net = { path = "crates/net" }
-mouseshare-x11input = { path = "crates/x11input" }
-mouseshare-discovery = { path = "crates/discovery" }
 # Single-threaded runtime: this app is one connection, polled at a fixed
 # tick rate, not a concurrent server -- a thread pool would just be idle
 # threads sitting in memory for no benefit.
-tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }

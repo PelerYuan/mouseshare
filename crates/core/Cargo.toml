@@ -1,0 +1,14 @@
+[package]
+name = "mouseshare-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mouseshare-protocol = { path = "../protocol" }
+mouseshare-layout = { path = "../layout" }
+mouseshare-net = { path = "../net" }
+mouseshare-x11input = { path = "../x11input" }
+mouseshare-discovery = { path = "../discovery" }
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
+tracing = "0.1"
+anyhow = "1"

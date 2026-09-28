@@ -3,6 +3,8 @@
 [![CI](https://github.com/PelerYuan/mouseshare/actions/workflows/ci.yml/badge.svg)](https://github.com/PelerYuan/mouseshare/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+[中文](README.zh-CN.md)
+
 A LAN mouse and keyboard sharing tool, in the spirit of
 Synergy/Barrier/Input Leap: one machine owns the physical mouse/keyboard;
 moving the cursor into a configured screen edge hands control to the

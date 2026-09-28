@@ -1,5 +1,7 @@
 # Code of Conduct
 
+[中文](CODE_OF_CONDUCT.zh-CN.md)
+
 Be respectful. Disagree about code and ideas, not about people. Assume
 good faith, keep feedback specific and actionable, and remember there's a
 person with limited time on the other end of every issue and PR.

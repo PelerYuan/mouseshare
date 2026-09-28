@@ -1,5 +1,7 @@
 # Contributing
 
+[中文](CONTRIBUTING.zh-CN.md)
+
 Thanks for considering a contribution to mouseshare.
 
 ## Before you start

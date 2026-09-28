@@ -22,15 +22,62 @@ fn main() -> eframe::Result<()> {
         .init();
 
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([820.0, 600.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 660.0]),
         ..Default::default()
     };
 
     eframe::run_native(
         "mouseshare",
         native_options,
-        Box::new(|_cc| Ok(Box::new(App::new(log_buffer)))),
+        Box::new(|cc| {
+            configure_style(&cc.egui_ctx);
+            Ok(Box::new(App::new(log_buffer)))
+        }),
     )
+}
+
+/// Nudges the stock egui dark theme toward something a bit less
+/// spreadsheet-default: softer rounding, more breathing room between
+/// widgets, and a touch more contrast between the side panel and the
+/// canvas behind it. Purely cosmetic -- no behavior here.
+fn configure_style(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = egui::Color32::from_rgb(27, 29, 33);
+    visuals.window_fill = egui::Color32::from_rgb(30, 32, 37);
+    visuals.extreme_bg_color = egui::Color32::from_rgb(18, 19, 22);
+    visuals.faint_bg_color = egui::Color32::from_rgb(36, 38, 43);
+    visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(33, 35, 40);
+    visuals.selection.bg_fill = egui::Color32::from_rgb(90, 130, 190);
+    let rounding = egui::Rounding::same(6.0);
+    visuals.window_rounding = rounding;
+    visuals.menu_rounding = rounding;
+    visuals.widgets.noninteractive.rounding = rounding;
+    visuals.widgets.inactive.rounding = rounding;
+    visuals.widgets.hovered.rounding = rounding;
+    visuals.widgets.active.rounding = rounding;
+    visuals.widgets.open.rounding = rounding;
+    ctx.set_visuals(visuals);
+
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+    style.spacing.button_padding = egui::vec2(10.0, 5.0);
+    style.spacing.window_margin = egui::Margin::same(12.0);
+    style.spacing.indent = 14.0;
+    ctx.set_style(style);
+}
+
+/// A left accent bar + bold label, used instead of a bare `ui.heading` to
+/// give each side-panel section a bit more visual weight without the
+/// clutter of a full box around every group.
+fn section_heading(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let accent = ui.visuals().selection.bg_fill;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(3.0, 16.0), egui::Sense::hover());
+        ui.painter().rect_filled(rect, 1.5, accent);
+        ui.label(egui::RichText::new(text).strong().size(14.5));
+    });
+    ui.add_space(2.0);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -176,7 +223,8 @@ impl App {
 
         match self.role {
             Role::Target => {
-                let listen_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.listen_port);
+                let listen_addr =
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.listen_port);
                 let handle = self.rt.spawn(async move {
                     let result = mouseshare_core::run_target(layout, listen_addr).await;
                     *status.lock().unwrap() = match result {
@@ -252,141 +300,282 @@ impl eframe::App for App {
         // without needing user input to nudge a frame.
         ctx.request_repaint_after(Duration::from_millis(200));
 
-        egui::SidePanel::left("config").min_width(320.0).show(ctx, |ui| {
-            ui.heading("Local screen");
-            ui.horizontal(|ui| {
-                ui.label("screen_id:");
-                ui.add_enabled(
-                    !self.is_running(),
-                    egui::TextEdit::singleline(&mut self.local_screen_id),
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.label("resolution:");
-                ui.add_enabled(
-                    !self.is_running(),
-                    egui::DragValue::new(&mut self.local_width).range(1..=16384),
-                );
-                ui.label("x");
-                ui.add_enabled(
-                    !self.is_running(),
-                    egui::DragValue::new(&mut self.local_height).range(1..=16384),
-                );
-            });
+        egui::SidePanel::left("config")
+            .min_width(340.0)
+            .default_width(360.0)
+            .show(ctx, |ui| {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.heading(egui::RichText::new("mouseshare").size(20.0).strong());
+                });
+                ui.add_space(4.0);
 
-            ui.separator();
-            ui.heading("Role");
-            ui.add_enabled_ui(!self.is_running(), |ui| {
-                ui.radio_value(&mut self.role, Role::Controller, "Controller (this machine has the mouse/keyboard)");
-                ui.radio_value(&mut self.role, Role::Target, "Target (receives control)");
-            });
+                section_heading(ui, "Local screen");
+                egui::Grid::new("local_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("screen_id");
+                        ui.add_enabled(
+                            !self.is_running(),
+                            egui::TextEdit::singleline(&mut self.local_screen_id)
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.end_row();
 
-            ui.separator();
-            match self.role {
-                Role::Target => {
-                    ui.heading("Listen port");
-                    ui.add_enabled(
-                        !self.is_running(),
-                        egui::DragValue::new(&mut self.listen_port).range(1..=65535),
+                        ui.label("resolution");
+                        ui.horizontal(|ui| {
+                            ui.add_enabled(
+                                !self.is_running(),
+                                egui::DragValue::new(&mut self.local_width).range(1..=16384),
+                            );
+                            ui.label("x");
+                            ui.add_enabled(
+                                !self.is_running(),
+                                egui::DragValue::new(&mut self.local_height).range(1..=16384),
+                            );
+                        });
+                        ui.end_row();
+                    });
+
+                ui.add_space(10.0);
+                ui.separator();
+                section_heading(ui, "Role");
+                ui.add_enabled_ui(!self.is_running(), |ui| {
+                    ui.radio_value(
+                        &mut self.role,
+                        Role::Controller,
+                        "Controller (this machine has the mouse/keyboard)",
                     );
-                }
-                Role::Controller => {
-                    ui.heading("Remote screen");
-                    ui.horizontal(|ui| {
-                        ui.label("screen_id:");
-                        ui.add_enabled(
-                            !self.is_running(),
-                            egui::TextEdit::singleline(&mut self.remote_screen_id),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("resolution:");
-                        ui.add_enabled(
-                            !self.is_running(),
-                            egui::DragValue::new(&mut self.remote_width).range(1..=16384),
-                        );
-                        ui.label("x");
-                        ui.add_enabled(
-                            !self.is_running(),
-                            egui::DragValue::new(&mut self.remote_height).range(1..=16384),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Connect address (blank = mDNS auto-discover):");
-                    });
-                    ui.add_enabled(
-                        !self.is_running(),
-                        egui::TextEdit::singleline(&mut self.connect_addr_text)
-                            .hint_text("192.168.1.20:7878"),
-                    );
+                    ui.radio_value(&mut self.role, Role::Target, "Target (receives control)");
+                });
 
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        let discovering = *self.discovering.lock().unwrap();
-                        if ui
-                            .add_enabled(!discovering, egui::Button::new("Scan LAN"))
-                            .clicked()
-                        {
-                            self.refresh_discovery();
-                        }
-                        if discovering {
-                            ui.spinner();
-                        }
-                    });
-                    let peers = self.discovered_peers.lock().unwrap().clone();
-                    for peer in &peers {
-                        let label = format!("{}  @ {}", peer.screen_id, peer.addr);
-                        if ui
-                            .add_enabled(!self.is_running(), egui::Button::new(label))
-                            .clicked()
-                        {
-                            self.remote_screen_id = peer.screen_id.clone();
-                            self.connect_addr_text = peer.addr.to_string();
+                ui.add_space(10.0);
+                ui.separator();
+                match self.role {
+                    Role::Target => {
+                        section_heading(ui, "Listen port");
+                        ui.add_enabled(
+                            !self.is_running(),
+                            egui::DragValue::new(&mut self.listen_port).range(1..=65535),
+                        );
+                    }
+                    Role::Controller => {
+                        section_heading(ui, "Remote screen");
+                        egui::Grid::new("remote_grid")
+                            .num_columns(2)
+                            .spacing([8.0, 6.0])
+                            .show(ui, |ui| {
+                                ui.label("screen_id");
+                                ui.add_enabled(
+                                    !self.is_running(),
+                                    egui::TextEdit::singleline(&mut self.remote_screen_id)
+                                        .desired_width(f32::INFINITY),
+                                );
+                                ui.end_row();
+
+                                ui.label("resolution");
+                                ui.horizontal(|ui| {
+                                    ui.add_enabled(
+                                        !self.is_running(),
+                                        egui::DragValue::new(&mut self.remote_width)
+                                            .range(1..=16384),
+                                    );
+                                    ui.label("x");
+                                    ui.add_enabled(
+                                        !self.is_running(),
+                                        egui::DragValue::new(&mut self.remote_height)
+                                            .range(1..=16384),
+                                    );
+                                });
+                                ui.end_row();
+                            });
+
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new("Connect address (blank = mDNS auto-discover)")
+                                .size(12.0)
+                                .weak(),
+                        );
+                        // The hint text already renders in the theme's dim
+                        // "weak" gray; without an explicit brighter color here,
+                        // real typed text used the default *inactive widget*
+                        // gray, which read as almost the same dimness -- you
+                        // couldn't tell a real address from the placeholder at a
+                        // glance. Force entered text to a near-white color so
+                        // there's real contrast between "empty, showing a hint"
+                        // and "has a value".
+                        ui.add_enabled(
+                            !self.is_running(),
+                            egui::TextEdit::singleline(&mut self.connect_addr_text)
+                                .desired_width(f32::INFINITY)
+                                .hint_text("192.168.1.20:7878")
+                                .text_color(egui::Color32::from_rgb(235, 237, 240)),
+                        );
+
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            let discovering = *self.discovering.lock().unwrap();
+                            // Match the Start/Stop buttons' rounded-pill accent
+                            // language instead of a flat default-gray rectangle:
+                            // an outlined accent pill reads as "secondary action
+                            // in the same design system" rather than a leftover
+                            // stock widget.
+                            let accent = ui.visuals().selection.bg_fill;
+                            let scan_button =
+                                egui::Button::new(egui::RichText::new("🔍  Scan LAN").strong())
+                                    .fill(accent.linear_multiply(0.16))
+                                    .stroke(egui::Stroke::new(1.3_f32, accent))
+                                    .min_size(egui::vec2(88.0, 28.0));
+                            if ui.add_enabled(!discovering, scan_button).clicked() {
+                                self.refresh_discovery();
+                            }
+                            if discovering {
+                                ui.spinner();
+                                ui.label(egui::RichText::new("scanning...").weak());
+                            }
+                        });
+                        let peers = self.discovered_peers.lock().unwrap().clone();
+                        if !peers.is_empty() {
+                            ui.add_space(4.0);
+                            egui::Frame::group(ui.style())
+                                .fill(ui.visuals().faint_bg_color)
+                                .rounding(6.0)
+                                .inner_margin(6.0)
+                                .show(ui, |ui| {
+                                    for peer in &peers {
+                                        let label = format!("{}  @ {}", peer.screen_id, peer.addr);
+                                        if ui
+                                            .add_enabled(
+                                                !self.is_running(),
+                                                egui::Button::new(label),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.remote_screen_id = peer.screen_id.clone();
+                                            self.connect_addr_text = peer.addr.to_string();
+                                        }
+                                    }
+                                });
                         }
                     }
                 }
-            }
 
-            ui.separator();
-            ui.horizontal(|ui| {
-                if !self.is_running() {
-                    if ui.button("Start").clicked() {
-                        // Placeholder offset; the real one comes from the
-                        // canvas widget drawn in the central panel below,
-                        // which runs after this closure on the same frame.
-                        // We stash the intent and apply it once the canvas
-                        // has reported its current snapped offset.
-                        self.pending_start = true;
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if !self.is_running() {
+                        let start_button =
+                            egui::Button::new(egui::RichText::new("▶  Start").strong())
+                                .fill(egui::Color32::from_rgb(60, 130, 80))
+                                .min_size(egui::vec2(88.0, 28.0));
+                        if ui.add(start_button).clicked() {
+                            // Placeholder offset; the real one comes from the
+                            // canvas widget drawn in the central panel below,
+                            // which runs after this closure on the same frame.
+                            // We stash the intent and apply it once the canvas
+                            // has reported its current snapped offset.
+                            self.pending_start = true;
+                        }
+                    } else {
+                        let stop_button =
+                            egui::Button::new(egui::RichText::new("■  Stop").strong())
+                                .fill(egui::Color32::from_rgb(150, 60, 60))
+                                .min_size(egui::vec2(88.0, 28.0));
+                        if ui.add(stop_button).clicked() {
+                            self.stop();
+                        }
                     }
-                } else if ui.button("Stop").clicked() {
-                    self.stop();
-                }
-                ui.label(self.status.lock().unwrap().label());
-            });
 
-            ui.separator();
-            ui.heading("Log");
-            egui::ScrollArea::vertical().max_height(180.0).stick_to_bottom(true).show(ui, |ui| {
-                for line in self.log_buffer.snapshot() {
-                    ui.monospace(line);
-                }
+                    let status = self.status.lock().unwrap();
+                    let (dot_color, text_color) = match &*status {
+                        Status::Idle => (egui::Color32::GRAY, ui.visuals().text_color()),
+                        Status::Running => (
+                            egui::Color32::from_rgb(90, 200, 110),
+                            egui::Color32::from_rgb(140, 220, 150),
+                        ),
+                        Status::Stopped => (egui::Color32::GRAY, ui.visuals().text_color()),
+                        Status::Error(_) => (
+                            egui::Color32::from_rgb(220, 90, 90),
+                            egui::Color32::from_rgb(240, 130, 130),
+                        ),
+                    };
+                    ui.add_space(4.0);
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                    ui.painter().circle_filled(rect.center(), 4.0, dot_color);
+                    ui.label(egui::RichText::new(status.label()).color(text_color));
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+                section_heading(ui, "Log");
+                // The Controller role's sidebar has more fields above this point
+                // than Target's (remote screen grid, connect address, scan
+                // button, discovered-peer list), so a fixed scroll height here
+                // used to push the frame's bottom edge past the panel's actual
+                // remaining space -- the rounded frame got silently clipped with
+                // no visible border. Size the scroll area from whatever room is
+                // actually left instead, so the whole frame (border included)
+                // always lands fully inside the panel regardless of role.
+                let log_inner_margin = 6.0;
+                let bottom_breathing_room = 6.0;
+                // Deliberately no lower-bound floor here: a floor that forces a
+                // minimum size regardless of what's actually left is exactly
+                // what caused the clipped frame in the first place (Controller's
+                // taller sidebar left less room than a fixed/floored height
+                // assumed). Only cap the *maximum* so a very roomy panel (e.g.
+                // Target's shorter sidebar) doesn't stretch the log absurdly
+                // tall; let it shrink as small as it truly must to always stay
+                // fully inside the panel.
+                let log_scroll_height =
+                    (ui.available_height() - log_inner_margin * 2.0 - bottom_breathing_room)
+                        .clamp(0.0, 220.0);
+                egui::Frame::group(ui.style())
+                    .fill(ui.visuals().extreme_bg_color)
+                    .rounding(6.0)
+                    .inner_margin(log_inner_margin)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(log_scroll_height)
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                for line in self.log_buffer.snapshot() {
+                                    ui.monospace(egui::RichText::new(line).size(11.5));
+                                }
+                            });
+                    });
             });
-        });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Screen arrangement (drag the remote screen against any edge of the local one)");
-            let offset = self.canvas.ui(
-                ui,
-                &self.local_screen_id,
-                (self.local_width, self.local_height),
-                &self.remote_screen_id,
-                (self.remote_width, self.remote_height),
-            );
+            ui.add_space(8.0);
+            ui.vertical_centered(|ui| {
+                ui.heading(
+                    egui::RichText::new("Screen arrangement")
+                        .size(18.0)
+                        .strong(),
+                );
+                ui.label(
+                    egui::RichText::new("Drag the remote screen against any edge of the local one")
+                        .weak(),
+                );
+            });
+            ui.add_space(16.0);
+            ui.vertical_centered(|ui| {
+                let offset = self.canvas.ui(
+                    ui,
+                    &self.local_screen_id,
+                    (self.local_width, self.local_height),
+                    &self.remote_screen_id,
+                    (self.remote_width, self.remote_height),
+                );
 
-            if self.pending_start {
-                self.pending_start = false;
-                self.start(&offset);
-            }
+                if self.pending_start {
+                    self.pending_start = false;
+                    self.start(&offset);
+                }
+            });
         });
     }
 }

@@ -80,6 +80,20 @@ fn section_heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
 }
 
+/// Wraps a section's contents in a subtly-filled rounded card, so the
+/// sidebar reads as a stack of grouped panels rather than a flat list of
+/// fields separated only by thin lines -- the flat-list version was part of
+/// what made the previous pass still feel unfinished despite the individual
+/// widgets being fine.
+fn card(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::group(ui.style())
+        .fill(ui.visuals().faint_bg_color)
+        .stroke(egui::Stroke::NONE)
+        .rounding(8.0)
+        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .show(ui, |ui| add_contents(ui));
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Role {
     Controller,
@@ -311,205 +325,253 @@ impl eframe::App for App {
                 ui.add_space(4.0);
 
                 section_heading(ui, "Local screen");
-                egui::Grid::new("local_grid")
-                    .num_columns(2)
-                    .spacing([8.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.label("screen_id");
-                        ui.add_enabled(
-                            !self.is_running(),
-                            egui::TextEdit::singleline(&mut self.local_screen_id)
-                                .desired_width(f32::INFINITY),
-                        );
-                        ui.end_row();
+                card(ui, |ui| {
+                    egui::Grid::new("local_grid")
+                        .num_columns(2)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("screen_id");
+                            ui.add_enabled(
+                                !self.is_running(),
+                                egui::TextEdit::singleline(&mut self.local_screen_id)
+                                    .desired_width(f32::INFINITY),
+                            );
+                            ui.end_row();
 
-                        ui.label("resolution");
-                        ui.horizontal(|ui| {
-                            ui.add_enabled(
-                                !self.is_running(),
-                                egui::DragValue::new(&mut self.local_width).range(1..=16384),
-                            );
-                            ui.label("x");
-                            ui.add_enabled(
-                                !self.is_running(),
-                                egui::DragValue::new(&mut self.local_height).range(1..=16384),
-                            );
+                            ui.label("resolution");
+                            ui.horizontal(|ui| {
+                                ui.add_enabled(
+                                    !self.is_running(),
+                                    egui::DragValue::new(&mut self.local_width).range(1..=16384),
+                                );
+                                ui.label("x");
+                                ui.add_enabled(
+                                    !self.is_running(),
+                                    egui::DragValue::new(&mut self.local_height).range(1..=16384),
+                                );
+                            });
+                            ui.end_row();
                         });
-                        ui.end_row();
-                    });
-
-                ui.add_space(10.0);
-                ui.separator();
-                section_heading(ui, "Role");
-                ui.add_enabled_ui(!self.is_running(), |ui| {
-                    ui.radio_value(
-                        &mut self.role,
-                        Role::Controller,
-                        "Controller (this machine has the mouse/keyboard)",
-                    );
-                    ui.radio_value(&mut self.role, Role::Target, "Target (receives control)");
                 });
 
                 ui.add_space(10.0);
-                ui.separator();
+                section_heading(ui, "Role");
+                card(ui, |ui| {
+                    ui.add_enabled_ui(!self.is_running(), |ui| {
+                        let accent = ui.visuals().selection.bg_fill;
+                        // A two-way segmented toggle instead of stacked radio
+                        // buttons: it's the more familiar "mode switch" pattern
+                        // in modern apps, and reads at a glance without having
+                        // to parse two full sentences of radio-button label.
+                        ui.columns(2, |cols| {
+                            let seg = |ui: &mut egui::Ui, selected: bool, label: &str| {
+                                let button = egui::Button::new(
+                                    egui::RichText::new(label).strong().color(if selected {
+                                        egui::Color32::WHITE
+                                    } else {
+                                        ui.visuals().text_color()
+                                    }),
+                                )
+                                .fill(if selected {
+                                    accent
+                                } else {
+                                    ui.visuals().extreme_bg_color
+                                })
+                                .stroke(egui::Stroke::new(
+                                    1.0_f32,
+                                    if selected {
+                                        accent
+                                    } else {
+                                        ui.visuals().widgets.inactive.bg_stroke.color
+                                    },
+                                ));
+                                ui.add_sized([ui.available_width(), 32.0], button)
+                            };
+                            if seg(&mut cols[0], self.role == Role::Controller, "🖱  Controller")
+                                .clicked()
+                            {
+                                self.role = Role::Controller;
+                            }
+                            if seg(&mut cols[1], self.role == Role::Target, "🖥  Target").clicked()
+                            {
+                                self.role = Role::Target;
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(match self.role {
+                            Role::Controller => "This machine has the mouse/keyboard.",
+                            Role::Target => "This machine receives control.",
+                        })
+                        .size(11.0)
+                        .weak(),
+                    );
+                });
+
+                ui.add_space(10.0);
                 match self.role {
                     Role::Target => {
                         section_heading(ui, "Listen port");
-                        ui.add_enabled(
-                            !self.is_running(),
-                            egui::DragValue::new(&mut self.listen_port).range(1..=65535),
-                        );
+                        card(ui, |ui| {
+                            ui.add_enabled(
+                                !self.is_running(),
+                                egui::DragValue::new(&mut self.listen_port).range(1..=65535),
+                            );
+                        });
                     }
                     Role::Controller => {
                         section_heading(ui, "Remote screen");
-                        egui::Grid::new("remote_grid")
-                            .num_columns(2)
-                            .spacing([8.0, 6.0])
-                            .show(ui, |ui| {
-                                ui.label("screen_id");
-                                ui.add_enabled(
-                                    !self.is_running(),
-                                    egui::TextEdit::singleline(&mut self.remote_screen_id)
-                                        .desired_width(f32::INFINITY),
-                                );
-                                ui.end_row();
+                        card(ui, |ui| {
+                            egui::Grid::new("remote_grid")
+                                .num_columns(2)
+                                .spacing([8.0, 6.0])
+                                .show(ui, |ui| {
+                                    ui.label("screen_id");
+                                    ui.add_enabled(
+                                        !self.is_running(),
+                                        egui::TextEdit::singleline(&mut self.remote_screen_id)
+                                            .desired_width(f32::INFINITY),
+                                    );
+                                    ui.end_row();
 
-                                ui.label("resolution");
-                                ui.horizontal(|ui| {
-                                    ui.add_enabled(
-                                        !self.is_running(),
-                                        egui::DragValue::new(&mut self.remote_width)
-                                            .range(1..=16384),
-                                    );
-                                    ui.label("x");
-                                    ui.add_enabled(
-                                        !self.is_running(),
-                                        egui::DragValue::new(&mut self.remote_height)
-                                            .range(1..=16384),
-                                    );
+                                    ui.label("resolution");
+                                    ui.horizontal(|ui| {
+                                        ui.add_enabled(
+                                            !self.is_running(),
+                                            egui::DragValue::new(&mut self.remote_width)
+                                                .range(1..=16384),
+                                        );
+                                        ui.label("x");
+                                        ui.add_enabled(
+                                            !self.is_running(),
+                                            egui::DragValue::new(&mut self.remote_height)
+                                                .range(1..=16384),
+                                        );
+                                    });
+                                    ui.end_row();
                                 });
-                                ui.end_row();
+
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new("Connect address (blank = mDNS auto-discover)")
+                                    .size(12.0)
+                                    .weak(),
+                            );
+                            // The hint text already renders in the theme's dim
+                            // "weak" gray; without an explicit brighter color here,
+                            // real typed text used the default *inactive widget*
+                            // gray, which read as almost the same dimness -- you
+                            // couldn't tell a real address from the placeholder at a
+                            // glance. Force entered text to a near-white color so
+                            // there's real contrast between "empty, showing a hint"
+                            // and "has a value".
+                            ui.add_enabled(
+                                !self.is_running(),
+                                egui::TextEdit::singleline(&mut self.connect_addr_text)
+                                    .desired_width(f32::INFINITY)
+                                    .hint_text("192.168.1.20:7878")
+                                    .text_color(egui::Color32::from_rgb(235, 237, 240)),
+                            );
+
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                let discovering = *self.discovering.lock().unwrap();
+                                // Match the Start/Stop buttons' rounded-pill accent
+                                // language instead of a flat default-gray rectangle:
+                                // an outlined accent pill reads as "secondary action
+                                // in the same design system" rather than a leftover
+                                // stock widget.
+                                let accent = ui.visuals().selection.bg_fill;
+                                let scan_button =
+                                    egui::Button::new(egui::RichText::new("🔍  Scan LAN").strong())
+                                        .fill(accent.linear_multiply(0.16))
+                                        .stroke(egui::Stroke::new(1.3_f32, accent))
+                                        .min_size(egui::vec2(88.0, 28.0));
+                                if ui.add_enabled(!discovering, scan_button).clicked() {
+                                    self.refresh_discovery();
+                                }
+                                if discovering {
+                                    ui.spinner();
+                                    ui.label(egui::RichText::new("scanning...").weak());
+                                }
                             });
-
-                        ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new("Connect address (blank = mDNS auto-discover)")
-                                .size(12.0)
-                                .weak(),
-                        );
-                        // The hint text already renders in the theme's dim
-                        // "weak" gray; without an explicit brighter color here,
-                        // real typed text used the default *inactive widget*
-                        // gray, which read as almost the same dimness -- you
-                        // couldn't tell a real address from the placeholder at a
-                        // glance. Force entered text to a near-white color so
-                        // there's real contrast between "empty, showing a hint"
-                        // and "has a value".
-                        ui.add_enabled(
-                            !self.is_running(),
-                            egui::TextEdit::singleline(&mut self.connect_addr_text)
-                                .desired_width(f32::INFINITY)
-                                .hint_text("192.168.1.20:7878")
-                                .text_color(egui::Color32::from_rgb(235, 237, 240)),
-                        );
-
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            let discovering = *self.discovering.lock().unwrap();
-                            // Match the Start/Stop buttons' rounded-pill accent
-                            // language instead of a flat default-gray rectangle:
-                            // an outlined accent pill reads as "secondary action
-                            // in the same design system" rather than a leftover
-                            // stock widget.
-                            let accent = ui.visuals().selection.bg_fill;
-                            let scan_button =
-                                egui::Button::new(egui::RichText::new("🔍  Scan LAN").strong())
-                                    .fill(accent.linear_multiply(0.16))
-                                    .stroke(egui::Stroke::new(1.3_f32, accent))
-                                    .min_size(egui::vec2(88.0, 28.0));
-                            if ui.add_enabled(!discovering, scan_button).clicked() {
-                                self.refresh_discovery();
-                            }
-                            if discovering {
-                                ui.spinner();
-                                ui.label(egui::RichText::new("scanning...").weak());
+                            let peers = self.discovered_peers.lock().unwrap().clone();
+                            if !peers.is_empty() {
+                                ui.add_space(4.0);
+                                egui::Frame::group(ui.style())
+                                    .fill(ui.visuals().extreme_bg_color)
+                                    .rounding(6.0)
+                                    .inner_margin(6.0)
+                                    .show(ui, |ui| {
+                                        for peer in &peers {
+                                            let label =
+                                                format!("{}  @ {}", peer.screen_id, peer.addr);
+                                            if ui
+                                                .add_enabled(
+                                                    !self.is_running(),
+                                                    egui::Button::new(label),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.remote_screen_id = peer.screen_id.clone();
+                                                self.connect_addr_text = peer.addr.to_string();
+                                            }
+                                        }
+                                    });
                             }
                         });
-                        let peers = self.discovered_peers.lock().unwrap().clone();
-                        if !peers.is_empty() {
-                            ui.add_space(4.0);
-                            egui::Frame::group(ui.style())
-                                .fill(ui.visuals().faint_bg_color)
-                                .rounding(6.0)
-                                .inner_margin(6.0)
-                                .show(ui, |ui| {
-                                    for peer in &peers {
-                                        let label = format!("{}  @ {}", peer.screen_id, peer.addr);
-                                        if ui
-                                            .add_enabled(
-                                                !self.is_running(),
-                                                egui::Button::new(label),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.remote_screen_id = peer.screen_id.clone();
-                                            self.connect_addr_text = peer.addr.to_string();
-                                        }
-                                    }
-                                });
-                        }
                     }
                 }
 
                 ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if !self.is_running() {
-                        let start_button =
-                            egui::Button::new(egui::RichText::new("▶  Start").strong())
-                                .fill(egui::Color32::from_rgb(60, 130, 80))
-                                .min_size(egui::vec2(88.0, 28.0));
-                        if ui.add(start_button).clicked() {
-                            // Placeholder offset; the real one comes from the
-                            // canvas widget drawn in the central panel below,
-                            // which runs after this closure on the same frame.
-                            // We stash the intent and apply it once the canvas
-                            // has reported its current snapped offset.
-                            self.pending_start = true;
+                card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if !self.is_running() {
+                            let start_button =
+                                egui::Button::new(egui::RichText::new("▶  Start").strong())
+                                    .fill(egui::Color32::from_rgb(60, 130, 80))
+                                    .min_size(egui::vec2(88.0, 28.0));
+                            if ui.add(start_button).clicked() {
+                                // Placeholder offset; the real one comes from the
+                                // canvas widget drawn in the central panel below,
+                                // which runs after this closure on the same frame.
+                                // We stash the intent and apply it once the canvas
+                                // has reported its current snapped offset.
+                                self.pending_start = true;
+                            }
+                        } else {
+                            let stop_button =
+                                egui::Button::new(egui::RichText::new("■  Stop").strong())
+                                    .fill(egui::Color32::from_rgb(150, 60, 60))
+                                    .min_size(egui::vec2(88.0, 28.0));
+                            if ui.add(stop_button).clicked() {
+                                self.stop();
+                            }
                         }
-                    } else {
-                        let stop_button =
-                            egui::Button::new(egui::RichText::new("■  Stop").strong())
-                                .fill(egui::Color32::from_rgb(150, 60, 60))
-                                .min_size(egui::vec2(88.0, 28.0));
-                        if ui.add(stop_button).clicked() {
-                            self.stop();
-                        }
-                    }
 
-                    let status = self.status.lock().unwrap();
-                    let (dot_color, text_color) = match &*status {
-                        Status::Idle => (egui::Color32::GRAY, ui.visuals().text_color()),
-                        Status::Running => (
-                            egui::Color32::from_rgb(90, 200, 110),
-                            egui::Color32::from_rgb(140, 220, 150),
-                        ),
-                        Status::Stopped => (egui::Color32::GRAY, ui.visuals().text_color()),
-                        Status::Error(_) => (
-                            egui::Color32::from_rgb(220, 90, 90),
-                            egui::Color32::from_rgb(240, 130, 130),
-                        ),
-                    };
-                    ui.add_space(4.0);
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                    ui.painter().circle_filled(rect.center(), 4.0, dot_color);
-                    ui.label(egui::RichText::new(status.label()).color(text_color));
+                        let status = self.status.lock().unwrap();
+                        let (dot_color, text_color) = match &*status {
+                            Status::Idle => (egui::Color32::GRAY, ui.visuals().text_color()),
+                            Status::Running => (
+                                egui::Color32::from_rgb(90, 200, 110),
+                                egui::Color32::from_rgb(140, 220, 150),
+                            ),
+                            Status::Stopped => (egui::Color32::GRAY, ui.visuals().text_color()),
+                            Status::Error(_) => (
+                                egui::Color32::from_rgb(220, 90, 90),
+                                egui::Color32::from_rgb(240, 130, 130),
+                            ),
+                        };
+                        ui.add_space(4.0);
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                        ui.painter().circle_filled(rect.center(), 4.0, dot_color);
+                        ui.label(egui::RichText::new(status.label()).color(text_color));
+                    });
                 });
 
                 ui.add_space(10.0);
-                ui.separator();
                 section_heading(ui, "Log");
                 // The Controller role's sidebar has more fields above this point
                 // than Target's (remote screen grid, connect address, scan
@@ -575,6 +637,31 @@ impl eframe::App for App {
                     self.pending_start = false;
                     self.start(&offset);
                 }
+
+                ui.add_space(10.0);
+                // One-click alignment along the touching edge: dragging by
+                // hand is fine when both screens are the same size, but two
+                // different resolutions/DPIs (e.g. a 4K screen next to a
+                // 1080p one) usually call for a specific, exact alignment
+                // rather than whatever pixel offset a drag happens to land
+                // on -- the same convenience real OS display-arrangement
+                // dialogs offer for mismatched monitors.
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Align:").weak());
+                    let (start_label, center_label, end_label) = match self.canvas.axis() {
+                        canvas::SnapAxis::Horizontal => ("Top", "Center", "Bottom"),
+                        canvas::SnapAxis::Vertical => ("Left", "Center", "Right"),
+                    };
+                    if ui.button(start_label).clicked() {
+                        self.canvas.align(canvas::Alignment::Start);
+                    }
+                    if ui.button(center_label).clicked() {
+                        self.canvas.align(canvas::Alignment::Center);
+                    }
+                    if ui.button(end_label).clicked() {
+                        self.canvas.align(canvas::Alignment::End);
+                    }
+                });
             });
         });
     }

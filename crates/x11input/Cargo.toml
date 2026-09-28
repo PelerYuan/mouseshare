@@ -2,6 +2,10 @@
 name = "mouseshare-x11input"
 version = "0.1.0"
 edition = "2021"
+description = "X11 pointer/keyboard capture, injection, and clipboard sync for mouseshare"
+license = "MIT"
+repository = "https://github.com/PelerYuan/mouseshare"
+publish = false
 
 [dependencies]
 x11rb = { version = "0.13", features = ["xtest"] }

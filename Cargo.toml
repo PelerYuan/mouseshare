@@ -6,6 +6,9 @@ resolver = "2"
 name = "mouseshare"
 version = "0.1.0"
 edition = "2021"
+description = "A lightweight LAN mouse/keyboard/clipboard sharing tool for Linux/X11"
+license = "MIT"
+repository = "https://github.com/PelerYuan/mouseshare"
 
 [dependencies]
 mouseshare-core = { path = "crates/core" }

@@ -2,6 +2,10 @@
 name = "mouseshare-core"
 version = "0.1.0"
 edition = "2021"
+description = "Controller/target runtime loops shared by every mouseshare frontend"
+license = "MIT"
+repository = "https://github.com/PelerYuan/mouseshare"
+publish = false
 
 [dependencies]
 mouseshare-protocol = { path = "../protocol" }

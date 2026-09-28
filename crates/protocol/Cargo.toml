@@ -2,6 +2,10 @@
 name = "mouseshare-protocol"
 version = "0.1.0"
 edition = "2021"
+description = "Wire message types and framing for mouseshare"
+license = "MIT"
+repository = "https://github.com/PelerYuan/mouseshare"
+publish = false
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

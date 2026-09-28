@@ -123,10 +123,7 @@ pub struct EdgeDetector {
 impl EdgeDetector {
     pub fn new(layout: LayoutConfig, reentry_margin: i32) -> Self {
         let local = layout.local_screen();
-        let start = (
-            local.x + local.width / 2,
-            local.y + local.height / 2,
-        );
+        let start = (local.x + local.width / 2, local.y + local.height / 2);
         Self {
             layout,
             state: ControlState::Local,
@@ -339,7 +336,7 @@ mod tests {
     fn remote_delta_returns_to_local_with_margin() {
         let mut d = EdgeDetector::new(two_screen_layout(), 5);
         d.on_local_move(999, 400).unwrap(); // hand off to B, virtual_pos = (1000, 400)
-        // Small negative delta stays within the margin around B's left edge.
+                                            // Small negative delta stays within the margin around B's left edge.
         assert_eq!(d.on_remote_delta(-3, 0), None);
         assert_eq!(*d.state(), ControlState::Remote("B".into()));
         // Crossing past the margin hands control back to Local.

@@ -137,12 +137,7 @@ fn xdotool(display: &str, args: &[&str]) -> String {
 fn xdotool_mousemove(display: &str, x: i32, y: i32) {
     xdotool(
         display,
-        &[
-            "mousemove",
-            "--sync",
-            &x.to_string(),
-            &y.to_string(),
-        ],
+        &["mousemove", "--sync", &x.to_string(), &y.to_string()],
     );
 }
 
@@ -265,7 +260,9 @@ fn capture_role_reports_correct_deltas() {
     cursor.begin_capture().expect("begin_capture");
 
     // begin_capture() warped the pointer to the center of the screen.
-    let (cx, cy) = cursor.query_pointer().expect("query_pointer after begin_capture");
+    let (cx, cy) = cursor
+        .query_pointer()
+        .expect("query_pointer after begin_capture");
     assert_eq!((cx, cy), (400, 300));
 
     // Rightward move: from center (400, 300) to (550, 300), i.e. dx=+150, dy=0.
@@ -281,7 +278,9 @@ fn capture_role_reports_correct_deltas() {
     );
 
     // The pointer should have been re-centered by poll_capture_delta.
-    let (rx, ry) = cursor.query_pointer().expect("query_pointer after recenter");
+    let (rx, ry) = cursor
+        .query_pointer()
+        .expect("query_pointer after recenter");
     assert_eq!((rx, ry), (400, 300), "pointer was not recentered");
 
     // Downward move: from center (400, 300) to (400, 450), i.e. dx=0, dy=+150.
@@ -301,7 +300,9 @@ fn capture_role_reports_correct_deltas() {
     // After ungrab, xdotool should be able to move the pointer freely again
     // and it should stick (no more recentering happening).
     xdotool_mousemove(&guard.display, 10, 10);
-    let (fx, fy) = cursor.query_pointer().expect("query_pointer after end_capture");
+    let (fx, fy) = cursor
+        .query_pointer()
+        .expect("query_pointer after end_capture");
     assert_eq!((fx, fy), (10, 10));
 }
 
@@ -356,14 +357,18 @@ fn inject_role_warps_relative_and_absolute() {
 
     // Relative warp.
     cursor.warp_relative(50, -30).expect("warp_relative");
-    let (after_x, after_y) = cursor.query_pointer().expect("query_pointer after warp_relative");
+    let (after_x, after_y) = cursor
+        .query_pointer()
+        .expect("query_pointer after warp_relative");
     assert_eq!((after_x, after_y), (350, 170));
     // Cross-check with an independent tool.
     assert_eq!(xdotool_mouselocation(&guard.display), (350, 170));
 
     // Absolute warp.
     cursor.warp_absolute(600, 450).expect("warp_absolute");
-    let (abs_x, abs_y) = cursor.query_pointer().expect("query_pointer after warp_absolute");
+    let (abs_x, abs_y) = cursor
+        .query_pointer()
+        .expect("query_pointer after warp_absolute");
     assert_eq!((abs_x, abs_y), (600, 450));
     assert_eq!(xdotool_mouselocation(&guard.display), (600, 450));
 }
@@ -494,7 +499,9 @@ fn inject_key_sets_and_clears_query_keymap_bit() {
         "keycode {keycode} should be down after inject_key(_, true)"
     );
 
-    cursor.inject_key(keycode, false).expect("inject_key release");
+    cursor
+        .inject_key(keycode, false)
+        .expect("inject_key release");
     let mut seen_up = false;
     for _ in 0..50 {
         if !is_down(keycode) {

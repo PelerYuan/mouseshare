@@ -10,7 +10,9 @@
 
 use std::net::SocketAddr;
 
-use mouseshare_protocol::{decode_body, encode_frame, Message, ProtocolError, MAX_FRAME_LEN, PROTOCOL_VERSION};
+use mouseshare_protocol::{
+    decode_body, encode_frame, Message, ProtocolError, MAX_FRAME_LEN, PROTOCOL_VERSION,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
@@ -42,7 +44,10 @@ pub enum NetError {
     /// During the handshake, the peer sent a message type other than the
     /// one expected at that step.
     #[error("handshake error: expected {expected}, got {got:?}")]
-    UnexpectedMessage { expected: &'static str, got: Message },
+    UnexpectedMessage {
+        expected: &'static str,
+        got: Message,
+    },
 
     /// The peer's `PROTOCOL_VERSION` doesn't match ours.
     #[error("protocol version mismatch: local={local}, peer={peer}")]
@@ -96,7 +101,10 @@ impl Connection {
     /// rather than working around it with `select!`.
     pub fn into_split(self) -> (ConnReader, ConnWriter) {
         let (read_half, write_half) = self.stream.into_split();
-        (ConnReader { stream: read_half }, ConnWriter { stream: write_half })
+        (
+            ConnReader { stream: read_half },
+            ConnWriter { stream: write_half },
+        )
     }
 
     /// Performs the handshake as the side that initiated the TCP
@@ -301,7 +309,10 @@ async fn recv_from<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Message, NetE
 
 /// Like `AsyncReadExt::read_exact`, but maps a clean or mid-frame EOF to
 /// `NetError::ConnectionClosed` instead of a generic IO error.
-async fn read_exact_or_eof<R: AsyncRead + Unpin>(stream: &mut R, buf: &mut [u8]) -> Result<(), NetError> {
+async fn read_exact_or_eof<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    buf: &mut [u8],
+) -> Result<(), NetError> {
     match stream.read_exact(buf).await {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Err(NetError::ConnectionClosed),

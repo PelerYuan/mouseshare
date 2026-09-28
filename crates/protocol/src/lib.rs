@@ -90,8 +90,14 @@ mod tests {
                 height: 720,
             },
             Message::MouseMove { dx: -5, dy: 12 },
-            Message::KeyEvent { keycode: 38, pressed: true },
-            Message::KeyEvent { keycode: 38, pressed: false },
+            Message::KeyEvent {
+                keycode: 38,
+                pressed: true,
+            },
+            Message::KeyEvent {
+                keycode: 38,
+                pressed: false,
+            },
             Message::ClipboardText("hello, clipboard".to_string()),
             Message::Heartbeat,
         ];

@@ -6,7 +6,10 @@ use clap::{Parser, Subcommand};
 use mouseshare_layout::LayoutConfig;
 
 #[derive(Parser)]
-#[command(name = "mouseshare", about = "LAN mouse sharing (MVP: mouse-only, X11)")]
+#[command(
+    name = "mouseshare",
+    about = "LAN mouse sharing (MVP: mouse-only, X11)"
+)]
 struct Cli {
     /// Path to the layout TOML config (see layout.example.toml).
     #[arg(long)]

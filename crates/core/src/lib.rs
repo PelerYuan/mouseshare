@@ -75,7 +75,8 @@ pub async fn resolve_target_addr(
         })?;
 
     tracing::info!(screen_id = %remote_id, ?timeout, "no target address given; discovering target via mDNS");
-    let peers = tokio::task::spawn_blocking(move || mouseshare_discovery::discover(timeout)).await??;
+    let peers =
+        tokio::task::spawn_blocking(move || mouseshare_discovery::discover(timeout)).await??;
     peers
         .into_iter()
         .find(|p| p.screen_id == remote_id)
@@ -351,7 +352,10 @@ pub async fn run_controller(layout: LayoutConfig, target_addr: SocketAddr) -> an
                 next_clipboard_poll = Instant::now() + CLIPBOARD_POLL_INTERVAL;
                 match clipboard.poll() {
                     Ok(Some(text)) => {
-                        tracing::info!(bytes = text.len(), "sending local clipboard change to target");
+                        tracing::info!(
+                            bytes = text.len(),
+                            "sending local clipboard change to target"
+                        );
                         writer.send(&Message::ClipboardText(text)).await?;
                     }
                     Ok(None) => {}

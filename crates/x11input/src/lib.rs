@@ -261,7 +261,16 @@ impl LocalCursor {
             // MotionNotify events will already be relative to the new
             // center by the time we read them.
             self.conn
-                .warp_pointer(NONE, self.root, 0, 0, 0, 0, center.0 as i16, center.1 as i16)?
+                .warp_pointer(
+                    NONE,
+                    self.root,
+                    0,
+                    0,
+                    0,
+                    0,
+                    center.0 as i16,
+                    center.1 as i16,
+                )?
                 .ignore_error();
             self.conn.flush()?;
         }

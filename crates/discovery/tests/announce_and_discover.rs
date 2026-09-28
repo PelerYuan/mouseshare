@@ -66,7 +66,10 @@ fn discovered_peer_address_is_actually_dialable() {
         .unwrap_or_else(|| panic!("expected to discover screen_id={screen_id:?}, got: {peers:?}"));
 
     std::net::TcpStream::connect(found.addr).unwrap_or_else(|e| {
-        panic!("discovered address {} should be directly dialable, but connect failed: {e}", found.addr)
+        panic!(
+            "discovered address {} should be directly dialable, but connect failed: {e}",
+            found.addr
+        )
     });
 }
 

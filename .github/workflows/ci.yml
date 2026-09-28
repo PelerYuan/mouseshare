@@ -38,7 +38,7 @@ jobs:
       - name: Install X11 test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb xdotool xmodmap xclip
+          sudo apt-get install -y xvfb xdotool x11-xserver-utils xclip
       - name: Run tests under a virtual display
         run: cargo test --workspace
 

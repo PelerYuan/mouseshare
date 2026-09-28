@@ -21,7 +21,10 @@ async fn mid_frame_disconnect_is_clean_error() {
 
     let mut client = TcpStream::connect(addr).await.expect("client connect");
     // Write only 2 of the 4 length-prefix bytes, then drop the socket.
-    client.write_all(&[0x00, 0x00]).await.expect("partial write");
+    client
+        .write_all(&[0x00, 0x00])
+        .await
+        .expect("partial write");
     drop(client);
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), server_task)

@@ -91,7 +91,10 @@ impl Clipboard {
         let atom_clipboard = conn.intern_atom(false, b"CLIPBOARD")?.reply()?.atom;
         let atom_utf8_string = conn.intern_atom(false, b"UTF8_STRING")?.reply()?.atom;
         let atom_targets = conn.intern_atom(false, b"TARGETS")?.reply()?.atom;
-        let atom_transfer = conn.intern_atom(false, b"MOUSESHARE_CLIPBOARD")?.reply()?.atom;
+        let atom_transfer = conn
+            .intern_atom(false, b"MOUSESHARE_CLIPBOARD")?
+            .reply()?
+            .atom;
         conn.flush()?;
 
         Ok(Self {
@@ -172,7 +175,11 @@ impl Clipboard {
             // Don't start a second transfer while one's still in flight.
             return Ok(());
         }
-        let owner = self.conn.get_selection_owner(self.atom_clipboard)?.reply()?.owner;
+        let owner = self
+            .conn
+            .get_selection_owner(self.atom_clipboard)?
+            .reply()?
+            .owner;
         if owner == self.last_seen_owner {
             return Ok(());
         }
@@ -209,12 +216,21 @@ impl Clipboard {
     /// Answers a `SelectionRequest` from some other local client asking for
     /// our clipboard content (we only get these while we're the owner).
     fn service_request(&mut self, req: SelectionRequestEvent) -> Result<(), X11Error> {
-        let property = if req.property == x11rb::NONE { req.target } else { req.property };
+        let property = if req.property == x11rb::NONE {
+            req.target
+        } else {
+            req.property
+        };
 
         let accepted = if req.target == self.atom_targets {
             let targets = [self.atom_utf8_string, self.atom_targets];
-            self.conn
-                .change_property32(PropMode::REPLACE, req.requestor, property, AtomEnum::ATOM, &targets)?;
+            self.conn.change_property32(
+                PropMode::REPLACE,
+                req.requestor,
+                property,
+                AtomEnum::ATOM,
+                &targets,
+            )?;
             true
         } else if req.target == self.atom_utf8_string {
             let text = self.owned_text.clone().unwrap_or_default();
@@ -239,7 +255,8 @@ impl Clipboard {
             target: req.target,
             property: if accepted { property } else { x11rb::NONE },
         };
-        self.conn.send_event(false, req.requestor, EventMask::NO_EVENT, notify)?;
+        self.conn
+            .send_event(false, req.requestor, EventMask::NO_EVENT, notify)?;
         self.conn.flush()?;
         Ok(())
     }

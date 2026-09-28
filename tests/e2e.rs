@@ -32,7 +32,10 @@ impl XvfbGuard {
         let socket = format!("/tmp/.X11-unix/X{display_num}");
         let deadline = Instant::now() + Duration::from_secs(10);
         while !Path::new(&socket).exists() {
-            assert!(Instant::now() < deadline, "Xvfb did not create {socket} in time");
+            assert!(
+                Instant::now() < deadline,
+                "Xvfb did not create {socket} in time"
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -101,7 +104,10 @@ fn xdotool(display: &str, args: &[&str]) -> String {
 }
 
 fn xdotool_mousemove(display: &str, x: i32, y: i32) {
-    xdotool(display, &["mousemove", "--sync", &x.to_string(), &y.to_string()]);
+    xdotool(
+        display,
+        &["mousemove", "--sync", &x.to_string(), &y.to_string()],
+    );
 }
 
 fn xdotool_mouselocation(display: &str) -> (i32, i32) {
@@ -115,13 +121,22 @@ fn xdotool_mouselocation(display: &str) -> (i32, i32) {
             y = v.parse::<i32>().ok();
         }
     }
-    (x.expect("no X= in getmouselocation output"), y.expect("no Y="))
+    (
+        x.expect("no X= in getmouselocation output"),
+        y.expect("no Y="),
+    )
 }
 
 /// Writes a two-screen layout (`id_a` at x=0..800, `id_b` at x=800..1600,
 /// both 800x600) with the given `local_id`, returning the config file's
 /// path.
-fn write_layout_with_ids(dir: &Path, filename: &str, local_id: &str, id_a: &str, id_b: &str) -> PathBuf {
+fn write_layout_with_ids(
+    dir: &Path,
+    filename: &str,
+    local_id: &str,
+    id_a: &str,
+    id_b: &str,
+) -> PathBuf {
     let path = dir.join(filename);
     let mut f = std::fs::File::create(&path).expect("create layout file");
     write!(
@@ -248,14 +263,22 @@ fn mouse_handoff_round_trip_between_two_real_processes() {
     // 2. While captured, A's own pointer should be pinned at the capture
     //    center (400, 300) — it must never visibly leave the local screen.
     let (ax, ay) = xdotool_mouselocation(&display_a.display);
-    assert_eq!((ax, ay), (400, 300), "local cursor should be pinned at the capture center");
+    assert_eq!(
+        (ax, ay),
+        (400, 300),
+        "local cursor should be pinned at the capture center"
+    );
 
     // 3. Move +50,0 from the (recentered) capture point; that delta should
     //    be forwarded over the network and injected into B.
     xdotool_mousemove(&display_a.display, 450, 300);
     std::thread::sleep(Duration::from_millis(300));
     let (bx1, by1) = xdotool_mouselocation(&display_b.display);
-    assert_eq!((bx1 - bx0, by1 - by0), (50, 0), "B's cursor should have moved by the forwarded delta");
+    assert_eq!(
+        (bx1 - bx0, by1 - by0),
+        (50, 0),
+        "B's cursor should have moved by the forwarded delta"
+    );
 
     // 4. A large leftward move should cross back over the (margin-guarded)
     //    boundary and hand control back to local, snapping A's real cursor
@@ -265,11 +288,19 @@ fn mouse_handoff_round_trip_between_two_real_processes() {
     xdotool_mousemove(&display_a.display, 300, 300);
     std::thread::sleep(Duration::from_millis(300));
     let (ax2, ay2) = xdotool_mouselocation(&display_a.display);
-    assert_eq!((ax2, ay2), (750, 300), "control should return to local at the exact crossing point");
+    assert_eq!(
+        (ax2, ay2),
+        (750, 300),
+        "control should return to local at the exact crossing point"
+    );
 
     // 5. B should not have moved any further once control returned.
     let (bx2, by2) = xdotool_mouselocation(&display_b.display);
-    assert_eq!((bx2, by2), (bx1, by1), "B's cursor should be untouched after control returns to local");
+    assert_eq!(
+        (bx2, by2),
+        (bx1, by1),
+        "B's cursor should be untouched after control returns to local"
+    );
 
     drop(controller);
     drop(target);
@@ -481,14 +512,22 @@ fn clipboard_syncs_bidirectionally_between_two_real_processes() {
     // A -> B: copy on the controller's display, read back on the target's.
     xclip_copy(&display_a.display, "from A to B");
     let seen = xclip_paste_eventually(&display_b.display, "from A to B", Duration::from_secs(5));
-    assert_eq!(seen.as_deref(), Some("from A to B"), "B should see A's clipboard update");
+    assert_eq!(
+        seen.as_deref(),
+        Some("from A to B"),
+        "B should see A's clipboard update"
+    );
 
     // B -> A: the reverse direction, proving sync isn't one-way and isn't
     // gated by which side currently owns mouse/keyboard control (neither
     // process has been driven to hand off control in this test at all).
     xclip_copy(&display_b.display, "from B to A");
     let seen = xclip_paste_eventually(&display_a.display, "from B to A", Duration::from_secs(5));
-    assert_eq!(seen.as_deref(), Some("from B to A"), "A should see B's clipboard update");
+    assert_eq!(
+        seen.as_deref(),
+        Some("from B to A"),
+        "A should see B's clipboard update"
+    );
 
     drop(controller);
     drop(target);

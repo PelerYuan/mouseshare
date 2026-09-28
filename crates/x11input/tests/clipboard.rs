@@ -48,7 +48,9 @@ impl Drop for XvfbGuard {
         loop {
             match self.child.try_wait() {
                 Ok(Some(_)) => return,
-                Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
                 _ => break,
             }
         }
@@ -138,7 +140,9 @@ fn set_text_is_readable_by_another_client() {
     let xvfb = XvfbGuard::spawn(210);
     let mut clipboard = connect_retrying(&xvfb.display);
 
-    clipboard.set_text("hello from mouseshare".to_string()).unwrap();
+    clipboard
+        .set_text("hello from mouseshare".to_string())
+        .unwrap();
 
     let got = xclip_paste_while_polling(&xvfb.display, &mut clipboard);
     assert_eq!(got, "hello from mouseshare");

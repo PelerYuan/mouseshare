@@ -257,7 +257,11 @@ fn peer_from_resolved(info: &ResolvedService) -> Option<DiscoveredPeer> {
     // sharing -- so the simplest correct fix is to only ever report an
     // IPv4 address, and treat "no IPv4 resolved for this instance yet" the
     // same as "not resolved yet" rather than handing back a broken one.
-    let ip = info.addresses.iter().find(|addr| addr.is_ipv4())?.to_ip_addr();
+    let ip = info
+        .addresses
+        .iter()
+        .find(|addr| addr.is_ipv4())?
+        .to_ip_addr();
 
     Some(DiscoveredPeer {
         screen_id,

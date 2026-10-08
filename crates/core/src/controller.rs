@@ -14,7 +14,9 @@ use mouseshare_layout::{ControlState, EdgeDetector, LayoutConfig, Transition};
 use mouseshare_net::{NetError, PairingCode, PeerInfo};
 use mouseshare_protocol::{Message, MonitorInfo};
 use mouseshare_x11input::{CaptureEvent, Clipboard, LocalCursor};
-use tokio::sync::mpsc::{error::TryRecvError, unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{
+    error::TryRecvError, unbounded_channel, UnboundedReceiver, UnboundedSender,
+};
 
 use crate::hotkey::HotkeyMatcher;
 use crate::telemetry::{Notice, PeerStatus, Telemetry};

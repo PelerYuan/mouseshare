@@ -95,13 +95,25 @@ pub struct Monitor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureEvent {
     /// Relative pointer motion since the previous event.
-    Motion { dx: i32, dy: i32 },
-    Key { keycode: u8, pressed: bool },
+    Motion {
+        dx: i32,
+        dy: i32,
+    },
+    Key {
+        keycode: u8,
+        pressed: bool,
+    },
     /// Pointer button (X11 numbering: 1 left, 2 middle, 3 right, 8/9
     /// back/forward). Wheel notches are reported as [`CaptureEvent::Scroll`].
-    Button { button: u8, pressed: bool },
+    Button {
+        button: u8,
+        pressed: bool,
+    },
     /// Wheel notches; positive `dy` is down, positive `dx` is right.
-    Scroll { dx: i32, dy: i32 },
+    Scroll {
+        dx: i32,
+        dy: i32,
+    },
 }
 
 /// A reference point, plus buffered events not yet claimed by the

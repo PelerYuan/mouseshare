@@ -20,8 +20,7 @@ pub use pairing::{PairingCode, PairingCodeError};
 use std::net::SocketAddr;
 
 use mouseshare_protocol::{
-    decode_body, encode_frame, Message, MonitorInfo, ProtocolError, MAX_FRAME_LEN,
-    PROTOCOL_VERSION,
+    decode_body, encode_frame, Message, MonitorInfo, ProtocolError, MAX_FRAME_LEN, PROTOCOL_VERSION,
 };
 use secure::Cipher;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};

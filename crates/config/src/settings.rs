@@ -283,7 +283,10 @@ impl Settings {
             })
             .collect();
         if !devices.iter().any(|d| d.id == self.device_name) {
-            devices.insert(0, Device::single(self.device_name.clone(), 0, 0, 1920, 1080));
+            devices.insert(
+                0,
+                Device::single(self.device_name.clone(), 0, 0, 1920, 1080),
+            );
         }
         let layout = LayoutConfig {
             local_id: self.device_name.clone(),

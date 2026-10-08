@@ -30,10 +30,7 @@ struct FailureLimiter {
 impl FailureLimiter {
     fn prune(&mut self, ip: IpAddr) -> usize {
         let q = self.fails.entry(ip).or_default();
-        while q
-            .front()
-            .is_some_and(|t| t.elapsed() > FAILURE_WINDOW)
-        {
+        while q.front().is_some_and(|t| t.elapsed() > FAILURE_WINDOW) {
             q.pop_front();
         }
         q.len()
@@ -99,11 +96,9 @@ pub async fn run_target(
                 device_id: device_id.clone(),
                 monitors: detect_monitors(&cursor),
             };
-            let handshake = tokio::time::timeout(
-                HANDSHAKE_TIMEOUT,
-                conn.handshake_as_listener(&code, &info),
-            )
-            .await;
+            let handshake =
+                tokio::time::timeout(HANDSHAKE_TIMEOUT, conn.handshake_as_listener(&code, &info))
+                    .await;
             let peer = match handshake {
                 Ok(Ok(peer)) => {
                     if let Some(ip) = ip {

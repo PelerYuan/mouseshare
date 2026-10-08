@@ -163,7 +163,9 @@ impl Drop for AbortOnDrop {
 /// cancellation-safe (see `mouseshare_net::ConnReader::recv`).
 pub(crate) async fn forward_incoming(
     mut reader: mouseshare_net::ConnReader,
-    tx: tokio::sync::mpsc::UnboundedSender<Result<mouseshare_protocol::Message, mouseshare_net::NetError>>,
+    tx: tokio::sync::mpsc::UnboundedSender<
+        Result<mouseshare_protocol::Message, mouseshare_net::NetError>,
+    >,
 ) {
     loop {
         let result = reader.recv().await;

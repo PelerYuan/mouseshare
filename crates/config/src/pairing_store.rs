@@ -44,7 +44,12 @@ impl PairingStore {
 
     /// This device's own code, generating and persisting one on first use.
     pub fn own_code(&mut self) -> PairingCode {
-        if let Some(code) = self.raw.own.as_deref().and_then(|s| PairingCode::parse(s).ok()) {
+        if let Some(code) = self
+            .raw
+            .own
+            .as_deref()
+            .and_then(|s| PairingCode::parse(s).ok())
+        {
             return code;
         }
         let code = PairingCode::generate();

@@ -131,7 +131,9 @@ async fn large_clipboard_payload_survives_encryption() {
     let expected = big.clone();
     let server = tokio::spawn(async move {
         let mut conn = listener.accept().await.unwrap();
-        conn.handshake_as_listener(&c2, &info("l", 1, 1)).await.unwrap();
+        conn.handshake_as_listener(&c2, &info("l", 1, 1))
+            .await
+            .unwrap();
         conn.recv().await.unwrap()
     });
     let mut dialer = connect(addr).await.unwrap();

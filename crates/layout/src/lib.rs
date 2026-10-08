@@ -98,8 +98,18 @@ impl Device {
     pub fn bounds(&self) -> (i32, i32, i32, i32) {
         let x0 = self.monitors.iter().map(|m| m.x).min().unwrap_or(0);
         let y0 = self.monitors.iter().map(|m| m.y).min().unwrap_or(0);
-        let x1 = self.monitors.iter().map(|m| m.x + m.width).max().unwrap_or(0);
-        let y1 = self.monitors.iter().map(|m| m.y + m.height).max().unwrap_or(0);
+        let x1 = self
+            .monitors
+            .iter()
+            .map(|m| m.x + m.width)
+            .max()
+            .unwrap_or(0);
+        let y1 = self
+            .monitors
+            .iter()
+            .map(|m| m.y + m.height)
+            .max()
+            .unwrap_or(0);
         (x0, y0, x1 - x0, y1 - y0)
     }
 

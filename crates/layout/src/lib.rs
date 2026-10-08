@@ -466,6 +466,15 @@ impl EdgeDetector {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn example_layout_file_parses() {
+        let cfg = LayoutConfig::from_toml_str(include_str!("../../../layout.example.toml"))
+            .expect("layout.example.toml must stay valid");
+        assert_eq!(cfg.local_id, "desk");
+        assert_eq!(cfg.devices.len(), 2);
+        assert_eq!(cfg.device("desk").unwrap().monitors.len(), 2);
+    }
+
     use super::*;
 
     fn two_screen_layout() -> LayoutConfig {

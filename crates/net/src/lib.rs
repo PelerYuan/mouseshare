@@ -112,7 +112,7 @@ impl Connection {
     }
 
     /// Reads, decrypts and decodes one message from the peer. See the
-    /// cancellation-safety note on the free function [`recv_from`], which
+    /// cancellation-safety note on the free function `recv_from`, which
     /// this delegates to.
     pub async fn recv(&mut self) -> Result<Message, NetError> {
         recv_from(&mut self.stream, self.recv_cipher.as_mut()).await
@@ -121,7 +121,7 @@ impl Connection {
     /// Splits into independent read/write halves backed by the same TCP
     /// connection, so one task can own [`ConnReader::recv`] in a plain loop
     /// while another independently owns [`ConnWriter::send`] -- avoids the
-    /// cancellation hazard documented on `recv()`/[`recv_from`] entirely,
+    /// cancellation hazard documented on `recv()`/`recv_from` entirely,
     /// rather than working around it with `select!`.
     pub fn into_split(self) -> (ConnReader, ConnWriter) {
         let (read_half, write_half) = self.stream.into_split();
@@ -282,7 +282,7 @@ pub async fn connect(addr: SocketAddr) -> Result<Connection, NetError> {
 
 /// The read half of a [`Connection`] split via [`Connection::into_split`].
 /// Meant to be owned by a single dedicated task looping on `recv()` — see
-/// the cancellation-safety note on [`recv_from`].
+/// the cancellation-safety note on `recv_from`.
 pub struct ConnReader {
     stream: OwnedReadHalf,
     cipher: Option<Cipher>,

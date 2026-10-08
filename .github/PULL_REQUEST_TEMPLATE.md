@@ -1,16 +1,19 @@
 ## What this changes
 
+<!-- A short summary. Link the issue: Fixes #123 -->
+
 ## Why
 
 ## How it was tested
 
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace`
-- [ ] Tested manually against real hardware/a real second machine (mouse/keyboard/clipboard sharing can't be fully verified by unit tests alone — say what you actually tried)
+<!-- What you ran, and — for input/clipboard behaviour — what you tried on real machines. -->
 
 ## Checklist
 
-- [ ] No new dependency added, or the new dependency's size/necessity is justified in the PR description
-- [ ] `README.md` updated if user-facing behavior, crates, or dependencies changed
-- [ ] Tests added/updated for the behavior this changes
+- [ ] `cargo fmt --all` and `cargo clippy --workspace --all-targets -- -D warnings` pass
+- [ ] `cargo test --workspace` passes
+- [ ] Tests added or updated for changed behaviour
+- [ ] No new dependency, or its size and necessity are justified above
+- [ ] Docs updated — English **and** the `*.zh-CN.md` counterpart (say so if you need help with Chinese)
+- [ ] `CHANGELOG.md` `[Unreleased]` updated for user-visible changes
+- [ ] User-visible UI strings added to `crates/gui/src/strings.rs` in both languages

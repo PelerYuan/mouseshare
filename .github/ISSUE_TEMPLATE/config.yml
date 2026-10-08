@@ -1,1 +1,11 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/PelerYuan/mouseshare/discussions
+    about: Ask how to do something, or float an idea, in Discussions.
+  - name: Security vulnerability
+    url: https://github.com/PelerYuan/mouseshare/security/advisories/new
+    about: Report security problems privately — do not open a public issue.
+  - name: Troubleshooting guide
+    url: https://github.com/PelerYuan/mouseshare/blob/master/docs/TROUBLESHOOTING.md
+    about: Common problems (nothing discovered, wrong pairing code, stuck cursor…) and fixes.

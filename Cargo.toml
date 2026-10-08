@@ -4,8 +4,9 @@ resolver = "2"
 
 [package]
 name = "mouseshare"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.88"
 description = "A lightweight LAN mouse/keyboard/clipboard sharing tool for Linux/X11"
 license = "MIT"
 repository = "https://github.com/PelerYuan/mouseshare"

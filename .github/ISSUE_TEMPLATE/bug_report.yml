@@ -1,0 +1,67 @@
+name: Bug report
+description: Something does not work the way it should
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please check the [troubleshooting guide](https://github.com/PelerYuan/mouseshare/blob/master/docs/TROUBLESHOOTING.md) first.
+        **Never paste `pairing.toml` or a pairing code.** `settings.toml` is safe.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. On computer B choose "Controlled" and press Start sharing
+        2. On computer A add B and press Start sharing
+        3. …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: mouseshare version
+      description: Output of `mouseshare --version`, or Settings → About.
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options: [".deb package", "Release tarball", "Built from source", "Other"]
+    validations:
+      required: true
+  - type: dropdown
+    id: role
+    attributes:
+      label: Which role is affected?
+      options: ["Controller", "Controlled (target)", "Both / not sure"]
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Distribution, desktop environment and session type
+      description: "For example: Ubuntu 24.04, GNOME, X11. Only X11 sessions are supported."
+      placeholder: "Ubuntu 24.04 / GNOME / X11"
+    validations:
+      required: true
+  - type: input
+    id: monitors
+    attributes:
+      label: Monitors / network setup (if relevant)
+      placeholder: "A: 2 monitors (2560x1440 + 1920x1080), B: laptop 1920x1080, same Wi-Fi"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: From the GUI Log panel or the CLI's stderr. Redact IP addresses you do not want to share.
+      render: text

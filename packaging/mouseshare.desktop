@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=mouseshare
+GenericName=Mouse and keyboard sharing
+GenericName[zh_CN]=鼠标键盘共享
+Comment=Share one mouse, keyboard and clipboard across your computers
+Comment[zh_CN]=在多台电脑之间共享同一套鼠标、键盘和剪贴板
+Exec=mouseshare-gui
+Icon=mouseshare
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=mouse;keyboard;share;clipboard;kvm;synergy;barrier;
+StartupWMClass=mouseshare

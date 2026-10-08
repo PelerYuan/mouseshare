@@ -1,0 +1,9 @@
+# Every change needs review from a code owner (enforced by branch protection).
+*                       @PelerYuan
+
+# Security-sensitive code and policy.
+/crates/net/            @PelerYuan
+/SECURITY.md            @PelerYuan
+/SECURITY.zh-CN.md      @PelerYuan
+/.github/               @PelerYuan
+/packaging/             @PelerYuan

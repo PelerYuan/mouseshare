@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// Fixed pairing code shared by both ends of every test.
+const CODE: &str = "7F3KD-9X2MQ";
+
 struct XvfbGuard {
     display: String,
     child: Child,
@@ -224,10 +227,13 @@ fn mouse_handoff_round_trip_between_two_real_processes() {
                 "--config",
                 layout_b.to_str().unwrap(),
                 "target",
+                "--pair-code",
+                CODE,
                 "--listen",
                 &format!("127.0.0.1:{port}"),
             ])
             .env("DISPLAY", &display_b.display)
+            .env("XDG_CONFIG_HOME", &tmp)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -241,10 +247,13 @@ fn mouse_handoff_round_trip_between_two_real_processes() {
                 "--config",
                 layout_a.to_str().unwrap(),
                 "controller",
+                "--pair-code",
+                CODE,
                 "--connect",
                 &format!("B=127.0.0.1:{port}"),
             ])
             .env("DISPLAY", &display_a.display)
+            .env("XDG_CONFIG_HOME", &tmp)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -330,10 +339,13 @@ fn keyboard_events_are_forwarded_while_remote() {
                 "--config",
                 layout_b.to_str().unwrap(),
                 "target",
+                "--pair-code",
+                CODE,
                 "--listen",
                 &format!("127.0.0.1:{port}"),
             ])
             .env("DISPLAY", &display_b.display)
+            .env("XDG_CONFIG_HOME", &tmp)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -347,10 +359,13 @@ fn keyboard_events_are_forwarded_while_remote() {
                 "--config",
                 layout_a.to_str().unwrap(),
                 "controller",
+                "--pair-code",
+                CODE,
                 "--connect",
                 &format!("B=127.0.0.1:{port}"),
             ])
             .env("DISPLAY", &display_a.display)
+            .env("XDG_CONFIG_HOME", &tmp)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -481,10 +496,13 @@ fn clipboard_syncs_bidirectionally_between_two_real_processes() {
                 "--config",
                 layout_b.to_str().unwrap(),
                 "target",
+                "--pair-code",
+                CODE,
                 "--listen",
                 &format!("127.0.0.1:{port}"),
             ])
             .env("DISPLAY", &display_b.display)
+            .env("XDG_CONFIG_HOME", &tmp)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -498,10 +516,13 @@ fn clipboard_syncs_bidirectionally_between_two_real_processes() {
                 "--config",
                 layout_a.to_str().unwrap(),
                 "controller",
+                "--pair-code",
+                CODE,
                 "--connect",
                 &format!("B=127.0.0.1:{port}"),
             ])
             .env("DISPLAY", &display_a.display)
+            .env("XDG_CONFIG_HOME", &tmp)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -563,6 +584,8 @@ fn controller_auto_discovers_target_via_mdns() {
                 "--config",
                 layout_b.to_str().unwrap(),
                 "target",
+                "--pair-code",
+                CODE,
                 "--listen",
                 // Must be reachable at the LAN address mDNS advertises, not
                 // just loopback, since the controller dials whatever
@@ -570,6 +593,7 @@ fn controller_auto_discovers_target_via_mdns() {
                 &format!("0.0.0.0:{port}"),
             ])
             .env("DISPLAY", &display_b.display)
+            .env("XDG_CONFIG_HOME", &tmp)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -584,8 +608,11 @@ fn controller_auto_discovers_target_via_mdns() {
                 "--config",
                 layout_a.to_str().unwrap(),
                 "controller", // deliberately no --connect
+                "--pair-code",
+                CODE,
             ])
             .env("DISPLAY", &display_a.display)
+            .env("XDG_CONFIG_HOME", &tmp)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -610,4 +637,317 @@ fn controller_auto_discovers_target_via_mdns() {
 
     drop(controller);
     drop(target);
+}
+
+// ---------------------------------------------------------------------
+// Product-level scenarios: buttons, wheel, pairing, reconnect, hotkey.
+// ---------------------------------------------------------------------
+
+/// Spawns `mouseshare target` for device "B" on `display`.
+fn spawn_target(display: &str, layout: &Path, port: u16, tmp: &Path, code: &str) -> ChildGuard {
+    ChildGuard(
+        Command::new(env!("CARGO_BIN_EXE_mouseshare"))
+            .args([
+                "--config",
+                layout.to_str().unwrap(),
+                "target",
+                "--pair-code",
+                code,
+                "--listen",
+                &format!("127.0.0.1:{port}"),
+            ])
+            .env("DISPLAY", display)
+            .env("XDG_CONFIG_HOME", tmp)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn target"),
+    )
+}
+
+/// Spawns `mouseshare controller` for device "A", logging to `log`.
+fn spawn_controller(
+    display: &str,
+    layout: &Path,
+    port: u16,
+    tmp: &Path,
+    code: &str,
+    log: &Path,
+) -> ChildGuard {
+    ChildGuard(
+        Command::new(env!("CARGO_BIN_EXE_mouseshare"))
+            .args([
+                "--config",
+                layout.to_str().unwrap(),
+                "controller",
+                "--pair-code",
+                code,
+                "--connect",
+                &format!("B=127.0.0.1:{port}"),
+            ])
+            .env("DISPLAY", display)
+            .env("XDG_CONFIG_HOME", tmp)
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(log).expect("create log"))
+            .spawn()
+            .expect("spawn controller"),
+    )
+}
+
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("mouseshare-e2e-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Polls `cond` until true or `timeout`.
+fn eventually(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if cond() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    cond()
+}
+
+/// Waits until the controller on `display_a` has the cursor captured, i.e.
+/// the pointer is pinned at the screen centre after pushing it to the edge.
+fn hand_off_to_b(display_a: &str) {
+    assert!(
+        eventually(Duration::from_secs(8), || {
+            xdotool_mousemove(display_a, 700, 300);
+            xdotool_mousemove(display_a, 799, 300);
+            std::thread::sleep(Duration::from_millis(150));
+            xdotool_mouselocation(display_a) == (400, 300)
+        }),
+        "control never moved to B"
+    );
+}
+
+/// Pointer button state on `display`, via an independent X connection.
+fn buttons_down(display: &str) -> u16 {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    let (conn, screen) = x11rb::connect(Some(display)).unwrap();
+    let root = conn.setup().roots[screen].root;
+    u16::from(conn.query_pointer(root).unwrap().reply().unwrap().mask)
+}
+
+/// Collects wheel/button presses on `display` through a transparent
+/// full-screen window, so the test can see exactly what was injected.
+struct PressWatcher {
+    conn: x11rb::rust_connection::RustConnection,
+}
+
+impl PressWatcher {
+    fn new(display: &str) -> Self {
+        use x11rb::connection::Connection as _;
+        use x11rb::protocol::xproto::*;
+        let (conn, screen_num) = x11rb::connect(Some(display)).unwrap();
+        let screen = &conn.setup().roots[screen_num];
+        let win = conn.generate_id().unwrap();
+        conn.create_window(
+            screen.root_depth,
+            win,
+            screen.root,
+            0,
+            0,
+            screen.width_in_pixels,
+            screen.height_in_pixels,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new()
+                .override_redirect(1)
+                .event_mask(EventMask::BUTTON_PRESS),
+        )
+        .unwrap();
+        conn.map_window(win).unwrap();
+        conn.flush().unwrap();
+        Self { conn }
+    }
+
+    /// Details (button numbers) of all presses seen so far.
+    fn presses(&self) -> Vec<u8> {
+        use x11rb::connection::Connection as _;
+        use x11rb::protocol::Event;
+        let mut out = Vec::new();
+        while let Ok(Some(ev)) = self.conn.poll_for_event() {
+            if let Event::ButtonPress(b) = ev {
+                out.push(b.detail);
+            }
+        }
+        out
+    }
+}
+
+#[test]
+fn clicks_and_wheel_are_forwarded_while_remote() {
+    let display_a = XvfbGuard::spawn(205, 800, 600);
+    let display_b = XvfbGuard::spawn(206, 800, 600);
+    let tmp = scratch("click");
+    let layout_a = write_layout(&tmp, "a.toml", "A");
+    let layout_b = write_layout(&tmp, "b.toml", "B");
+    let port = free_port();
+    let _target = spawn_target(&display_b.display, &layout_b, port, &tmp, CODE);
+    std::thread::sleep(Duration::from_millis(500));
+    let _controller = spawn_controller(
+        &display_a.display,
+        &layout_a,
+        port,
+        &tmp,
+        CODE,
+        &tmp.join("c.log"),
+    );
+    std::thread::sleep(Duration::from_millis(800));
+
+    hand_off_to_b(&display_a.display);
+    let watcher = PressWatcher::new(&display_b.display);
+
+    // Left button press/release is forwarded as a press and a release.
+    xdotool(&display_a.display, &["mousedown", "1"]);
+    assert!(
+        eventually(Duration::from_secs(3), || buttons_down(&display_b.display)
+            & 0x100
+            != 0),
+        "button 1 should be held down on B"
+    );
+    xdotool(&display_a.display, &["mouseup", "1"]);
+    assert!(
+        eventually(Duration::from_secs(3), || buttons_down(&display_b.display)
+            & 0x100
+            == 0),
+        "button 1 should be released on B"
+    );
+
+    // Wheel notches arrive as button 4/5 presses.
+    xdotool(&display_a.display, &["click", "5"]);
+    xdotool(&display_a.display, &["click", "4"]);
+    let mut seen = Vec::new();
+    assert!(
+        eventually(Duration::from_secs(3), || {
+            seen.extend(watcher.presses());
+            seen.contains(&4) && seen.contains(&5)
+        }),
+        "wheel up/down should be injected on B, saw {seen:?}"
+    );
+}
+
+#[test]
+fn wrong_pairing_code_is_rejected() {
+    let display_a = XvfbGuard::spawn(207, 800, 600);
+    let display_b = XvfbGuard::spawn(208, 800, 600);
+    let tmp = scratch("badcode");
+    let layout_a = write_layout(&tmp, "a.toml", "A");
+    let layout_b = write_layout(&tmp, "b.toml", "B");
+    let port = free_port();
+    let _target = spawn_target(&display_b.display, &layout_b, port, &tmp, CODE);
+    std::thread::sleep(Duration::from_millis(500));
+    let log = tmp.join("c.log");
+    let _controller = spawn_controller(
+        &display_a.display,
+        &layout_a,
+        port,
+        &tmp,
+        "AAAAA-AAAAA",
+        &log,
+    );
+
+    assert!(
+        eventually(Duration::from_secs(8), || {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .contains("authentication failed")
+        }),
+        "controller should report an authentication failure"
+    );
+    // The edge is not a gateway: nothing is captured, nothing moves on B.
+    let (bx, by) = xdotool_mouselocation(&display_b.display);
+    xdotool_mousemove(&display_a.display, 799, 300);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(xdotool_mouselocation(&display_a.display), (799, 300));
+    assert_eq!(xdotool_mouselocation(&display_b.display), (bx, by));
+}
+
+#[test]
+fn controller_reconnects_after_target_restarts() {
+    let display_a = XvfbGuard::spawn(209, 800, 600);
+    let display_b = XvfbGuard::spawn(210, 800, 600);
+    let tmp = scratch("reconnect");
+    let layout_a = write_layout(&tmp, "a.toml", "A");
+    let layout_b = write_layout(&tmp, "b.toml", "B");
+    let port = free_port();
+
+    // Controller first: the target does not exist yet.
+    let _controller = spawn_controller(
+        &display_a.display,
+        &layout_a,
+        port,
+        &tmp,
+        CODE,
+        &tmp.join("c.log"),
+    );
+    std::thread::sleep(Duration::from_millis(700));
+    let target = spawn_target(&display_b.display, &layout_b, port, &tmp, CODE);
+    hand_off_to_b(&display_a.display);
+
+    // Target dies while it owns the cursor: control comes straight back.
+    drop(target);
+    assert!(
+        eventually(Duration::from_secs(15), || {
+            xdotool_mousemove(&display_a.display, 100, 100);
+            std::thread::sleep(Duration::from_millis(100));
+            xdotool_mouselocation(&display_a.display) == (100, 100)
+        }),
+        "cursor should return to A when the target disappears"
+    );
+
+    // Target returns: the controller reconnects by itself.
+    let _target = spawn_target(&display_b.display, &layout_b, port, &tmp, CODE);
+    std::thread::sleep(Duration::from_millis(500));
+    hand_off_to_b(&display_a.display);
+}
+
+#[test]
+fn emergency_hotkey_returns_control_and_releases_keys() {
+    let display_a = XvfbGuard::spawn(211, 800, 600);
+    let display_b = XvfbGuard::spawn(212, 800, 600);
+    let tmp = scratch("hotkey");
+    let layout_a = write_layout(&tmp, "a.toml", "A");
+    let layout_b = write_layout(&tmp, "b.toml", "B");
+    let port = free_port();
+    let _target = spawn_target(&display_b.display, &layout_b, port, &tmp, CODE);
+    std::thread::sleep(Duration::from_millis(500));
+    let _controller = spawn_controller(
+        &display_a.display,
+        &layout_a,
+        port,
+        &tmp,
+        CODE,
+        &tmp.join("c.log"),
+    );
+    std::thread::sleep(Duration::from_millis(800));
+    hand_off_to_b(&display_a.display);
+
+    xdotool(&display_a.display, &["key", "ctrl+alt+Escape"]);
+    // Control is back: the pointer is free to go anywhere again.
+    assert!(
+        eventually(Duration::from_secs(3), || {
+            xdotool_mousemove(&display_a.display, 100, 100);
+            std::thread::sleep(Duration::from_millis(100));
+            xdotool_mouselocation(&display_a.display) == (100, 100)
+        }),
+        "hotkey should end capture"
+    );
+
+    // Nothing is left stuck down on B (Control_L / Alt_L / Escape).
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    let (conn, _) = x11rb::connect(Some(&display_b.display)).unwrap();
+    let keys = conn.query_keymap().unwrap().reply().unwrap().keys;
+    assert!(
+        keys.iter().all(|b| *b == 0),
+        "no key should remain pressed on B: {keys:?}"
+    );
 }

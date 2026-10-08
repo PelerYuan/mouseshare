@@ -288,15 +288,13 @@ impl LocalCursor {
                         pressed: true,
                     }),
                 },
-                Event::ButtonRelease(b) => {
-                    // Wheel "buttons" only generate a press we already
-                    // turned into a notch; their release carries no info.
-                    if !(4..=7).contains(&b.detail) {
-                        new_events.push(CaptureEvent::Button {
-                            button: b.detail,
-                            pressed: false,
-                        });
-                    }
+                // Wheel "buttons" only generate a press we already turned
+                // into a notch; their release carries no information.
+                Event::ButtonRelease(b) if !(4..=7).contains(&b.detail) => {
+                    new_events.push(CaptureEvent::Button {
+                        button: b.detail,
+                        pressed: false,
+                    });
                 }
                 _ => {}
             }

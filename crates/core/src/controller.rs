@@ -564,7 +564,14 @@ impl Controller {
         from: &str,
         peer_gone: bool,
     ) -> anyhow::Result<()> {
-        let forced = self.detector.force_local();
+        // Reaching this without a crossing point means control was pulled
+        // back (hotkey / lost device): land mid-screen, not on an edge,
+        // or the next tick would immediately hand off again.
+        self.detector.force_local();
+        let centre = {
+            let local = self.detector.layout().local_device();
+            local.center_local()
+        };
         if !peer_gone {
             self.release_all(from);
         } else {
@@ -573,7 +580,7 @@ impl Controller {
         }
         self.detector.set_hold(false);
         self.cursor.end_capture()?;
-        let (x, y) = target.unwrap_or(forced);
+        let (x, y) = target.unwrap_or(centre);
         self.cursor.warp_absolute(x, y)?;
         self.tele.set_active(None);
         tracing::info!("control returned to local");

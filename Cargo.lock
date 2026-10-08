@@ -1375,11 +1375,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "mouseshare-config",
  "mouseshare-core",
  "mouseshare-layout",
- "serde",
  "tokio",
- "toml",
  "tracing",
  "tracing-subscriber",
  "x11rb",

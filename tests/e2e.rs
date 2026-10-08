@@ -242,7 +242,7 @@ fn mouse_handoff_round_trip_between_two_real_processes() {
                 layout_a.to_str().unwrap(),
                 "controller",
                 "--connect",
-                &format!("127.0.0.1:{port}"),
+                &format!("B=127.0.0.1:{port}"),
             ])
             .env("DISPLAY", &display_a.display)
             .stdout(Stdio::null())
@@ -348,7 +348,7 @@ fn keyboard_events_are_forwarded_while_remote() {
                 layout_a.to_str().unwrap(),
                 "controller",
                 "--connect",
-                &format!("127.0.0.1:{port}"),
+                &format!("B=127.0.0.1:{port}"),
             ])
             .env("DISPLAY", &display_a.display)
             .stdout(Stdio::null())
@@ -499,7 +499,7 @@ fn clipboard_syncs_bidirectionally_between_two_real_processes() {
                 layout_a.to_str().unwrap(),
                 "controller",
                 "--connect",
-                &format!("127.0.0.1:{port}"),
+                &format!("B=127.0.0.1:{port}"),
             ])
             .env("DISPLAY", &display_a.display)
             .stdout(Stdio::null())

@@ -196,6 +196,24 @@ impl EdgeDetector {
         self.resolve_new_screen(&current.id, true)
     }
 
+    /// Forces control back to `Local` immediately, e.g. because the
+    /// currently-controlled remote's connection was just lost. Without
+    /// this, a caller has no way to recover: `on_remote_delta` only ever
+    /// returns to `Local` when a delta crosses back into the local
+    /// screen's margin, which never happens on its own once nothing is
+    /// forwarding deltas anywhere.
+    ///
+    /// Returns the absolute local-screen coordinates the OS cursor should
+    /// be warped to (the current virtual position, clamped into the local
+    /// screen's bounds since it was last tracked somewhere else).
+    pub fn force_local(&mut self) -> (i32, i32) {
+        let local = self.layout.local_screen().clone();
+        let (vx, vy) = local.clamp(self.virtual_pos.0, self.virtual_pos.1);
+        self.virtual_pos = (vx, vy);
+        self.state = ControlState::Local;
+        local.to_local(vx, vy)
+    }
+
     fn resolve_new_screen(&mut self, exclude_id: &str, is_remote: bool) -> Option<Transition> {
         let (vx, vy) = self.virtual_pos;
         for screen in &self.layout.screens {
@@ -344,6 +362,18 @@ mod tests {
         assert_eq!(t.new_state, ControlState::Local);
         let (lx, ly) = t.local_target.expect("local target must be set");
         assert_eq!((lx, ly), (987, 400));
+    }
+
+    #[test]
+    fn force_local_recovers_from_a_dead_remote() {
+        let mut d = EdgeDetector::new(two_screen_layout(), 2);
+        d.on_local_move(999, 400).unwrap(); // hand off to B, virtual_pos = (1000, 400)
+        assert_eq!(d.on_remote_delta(50, 30), None); // still remote, virtual_pos = (1050, 430)
+        let (lx, ly) = d.force_local();
+        assert_eq!(*d.state(), ControlState::Local);
+        // virtual_pos (1050, 430) is inside B, not A -- clamped onto A's
+        // right wall (last valid pixel column) at the same y.
+        assert_eq!((lx, ly), (999, 430));
     }
 
     #[test]

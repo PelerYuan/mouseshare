@@ -1,9 +1,22 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use mouseshare_layout::LayoutConfig;
+
+/// Parses a single `--connect` value of the form `screen_id=host:port`.
+fn parse_connect_override(s: &str) -> Result<(String, SocketAddr), String> {
+    let (id, addr) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected screen_id=host:port, got {s:?}"))?;
+    let addr: SocketAddr = addr
+        .parse()
+        .map_err(|e| format!("invalid address {addr:?} for screen {id:?}: {e}"))?;
+    Ok((id.to_string(), addr))
+}
 
 #[derive(Parser)]
 #[command(
@@ -23,14 +36,16 @@ struct Cli {
 enum Role {
     /// Runs on the machine that owns the physical mouse.
     Controller {
-        /// Address of the target machine, e.g. 192.168.1.20:7878. If
-        /// omitted, the target is auto-discovered on the LAN via mDNS
-        /// instead (it must be the other screen configured in --config).
-        #[arg(long)]
-        connect: Option<SocketAddr>,
+        /// Explicit address for one remote screen, as screen_id=host:port
+        /// (e.g. --connect office-pc=192.168.1.20:7878). Repeat for every
+        /// remote screen that shouldn't rely on mDNS auto-discovery; any
+        /// remote screen in --config without a matching --connect is
+        /// auto-discovered on the LAN instead.
+        #[arg(long = "connect", value_parser = parse_connect_override)]
+        connect: Vec<(String, SocketAddr)>,
 
         /// How long to wait for mDNS replies when auto-discovering (only
-        /// used when --connect is omitted).
+        /// relevant for remote screens without a --connect override).
         #[arg(long, default_value_t = mouseshare_core::DEFAULT_DISCOVER_TIMEOUT.as_secs())]
         discover_timeout_secs: u64,
     },
@@ -54,10 +69,15 @@ async fn main() -> anyhow::Result<()> {
             discover_timeout_secs,
         } => {
             let timeout = Duration::from_secs(discover_timeout_secs);
-            let target_addr =
-                mouseshare_core::resolve_target_addr(&layout, connect, timeout).await?;
-            mouseshare_core::run_controller(layout, target_addr).await
+            let overrides: HashMap<String, SocketAddr> = connect.into_iter().collect();
+            let targets =
+                mouseshare_core::resolve_target_addrs(&layout, &overrides, timeout).await?;
+            let peer_status = Arc::new(Mutex::new(HashMap::new()));
+            mouseshare_core::run_controller(layout, targets, peer_status).await
         }
-        Role::Target { listen } => mouseshare_core::run_target(layout, listen).await,
+        Role::Target { listen } => {
+            let controller_status = Arc::new(Mutex::new(None));
+            mouseshare_core::run_target(layout, listen, controller_status).await
+        }
     }
 }

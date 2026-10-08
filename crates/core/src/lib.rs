@@ -9,14 +9,42 @@
 //! them (stderr logging for the CLI, an in-memory ring buffer for a GUI log
 //! panel) without this crate needing to know about it.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mouseshare_discovery::Announcement;
-use mouseshare_layout::{ControlState, EdgeDetector, LayoutConfig};
+use mouseshare_layout::{ControlState, EdgeDetector, LayoutConfig, Transition};
 use mouseshare_net::{Connection, NetError};
 use mouseshare_protocol::Message;
 use mouseshare_x11input::{Clipboard, LocalCursor};
+
+/// Per-target connection state, reported live so a GUI can show a status dot
+/// on each device row instead of one opaque app-global message -- this is
+/// real data backing that dot, not just a color token with nothing behind
+/// it: it's written directly from the same code paths that already know
+/// whether a given target connected, failed, or dropped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PeerStatus {
+    /// Dial/handshake in flight; not yet known to succeed or fail.
+    Connecting,
+    Connected,
+    /// Carries a human-readable reason (a failed dial, a failed handshake,
+    /// or the error a live connection ended with).
+    Failed(String),
+}
+
+/// Shared map a caller can poll to render per-device connection status.
+/// Keyed by screen id. A GUI clones this `Arc` before calling
+/// `run_controller`/`run_target` and reads it from the UI thread each frame;
+/// callers that don't care (the CLI) can just make one and drop it.
+pub type PeerStatusMap = Arc<Mutex<HashMap<String, PeerStatus>>>;
+
+/// Shared cell a Target-role caller can poll to show which controller (if
+/// any) currently has this machine, e.g. "Connected to desk-1" in a GUI.
+/// `None` means no controller is currently connected.
+pub type ControllerIdCell = Arc<Mutex<Option<String>>>;
 
 /// Pixels of hysteresis applied when control might return from a remote
 /// screen to local, to avoid flicker right at the seam.
@@ -49,43 +77,56 @@ impl Drop for AbortOnDrop {
 /// auto-discovering a target instead of dialing a known address.
 pub const DEFAULT_DISCOVER_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Returns `connect` unchanged if given, otherwise browses the LAN via mDNS
-/// for a mouseshare target announcing the layout's other configured screen.
-///
-/// MVP is single-peer: the only sensible auto-discovery target is whichever
-/// other screen this layout has configured alongside the local one.
-pub async fn resolve_target_addr(
+/// Resolves an address for every remote (non-local) screen configured in
+/// `layout`, so the controller can connect out to all of them. `overrides`
+/// supplies an explicit address for any screen id that shouldn't rely on
+/// mDNS (e.g. a user-typed "Connect address"); every remote screen without
+/// an override is auto-discovered on the LAN in a single mDNS browse.
+pub async fn resolve_target_addrs(
     layout: &LayoutConfig,
-    connect: Option<SocketAddr>,
+    overrides: &HashMap<String, SocketAddr>,
     timeout: Duration,
-) -> anyhow::Result<SocketAddr> {
-    if let Some(addr) = connect {
-        return Ok(addr);
-    }
-
-    let remote_id = layout
+) -> anyhow::Result<HashMap<String, SocketAddr>> {
+    let remote_ids: Vec<String> = layout
         .screens
         .iter()
         .map(|s| s.id.clone())
-        .find(|id| *id != layout.local_id)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no target address was given but the layout config has no other screen to discover"
-            )
-        })?;
+        .filter(|id| *id != layout.local_id)
+        .collect();
+    if remote_ids.is_empty() {
+        anyhow::bail!("layout config has no remote screens besides the local one");
+    }
 
-    tracing::info!(screen_id = %remote_id, ?timeout, "no target address given; discovering target via mDNS");
-    let peers =
-        tokio::task::spawn_blocking(move || mouseshare_discovery::discover(timeout)).await??;
-    peers
-        .into_iter()
-        .find(|p| p.screen_id == remote_id)
-        .map(|p| p.addr)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no mouseshare target announcing screen_id {remote_id:?} was found on the LAN within {timeout:?}"
-            )
-        })
+    let mut resolved = HashMap::new();
+    let mut need_discovery = Vec::new();
+    for id in remote_ids {
+        match overrides.get(&id) {
+            Some(addr) => {
+                resolved.insert(id, *addr);
+            }
+            None => need_discovery.push(id),
+        }
+    }
+
+    if !need_discovery.is_empty() {
+        tracing::info!(?need_discovery, ?timeout, "discovering targets via mDNS");
+        let peers =
+            tokio::task::spawn_blocking(move || mouseshare_discovery::discover(timeout)).await??;
+        for id in need_discovery {
+            let addr = peers
+                .iter()
+                .find(|p| p.screen_id == id)
+                .map(|p| p.addr)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no mouseshare target announcing screen_id {id:?} was found on the LAN within {timeout:?}"
+                    )
+                })?;
+            resolved.insert(id, addr);
+        }
+    }
+
+    Ok(resolved)
 }
 
 /// Runs the target role forever: listens for controller connections,
@@ -96,7 +137,16 @@ pub async fn resolve_target_addr(
 /// Only returns on an unrecoverable error (e.g. failing to bind
 /// `listen_addr`); per-connection errors are logged and the loop continues
 /// to accept the next controller.
-pub async fn run_target(layout: LayoutConfig, listen_addr: SocketAddr) -> anyhow::Result<()> {
+///
+/// `controller_status` is set to the connected controller's screen id for as
+/// long as a controller connection is live, and back to `None` once it ends
+/// -- a GUI can poll this to show "Connected to `<id>`" without this crate
+/// needing to know anything about how that's rendered.
+pub async fn run_target(
+    layout: LayoutConfig,
+    listen_addr: SocketAddr,
+    controller_status: ControllerIdCell,
+) -> anyhow::Result<()> {
     let local = layout.local_screen().clone();
     let listener = mouseshare_net::listen(listen_addr).await?;
     let bound_addr = listener.local_addr()?;
@@ -144,7 +194,10 @@ pub async fn run_target(layout: LayoutConfig, listen_addr: SocketAddr) -> anyhow
             }
         };
 
-        if let Err(e) = handle_target_connection(conn, &cursor, clipboard).await {
+        *controller_status.lock().unwrap() = Some(peer.screen_id.clone());
+        let result = handle_target_connection(conn, &cursor, clipboard).await;
+        *controller_status.lock().unwrap() = None;
+        if let Err(e) = result {
             tracing::warn!("controller connection ended: {e}");
         }
     }
@@ -166,6 +219,33 @@ async fn forward_incoming(
             return;
         }
     }
+}
+
+/// Same as `forward_incoming`, but tags every message with which peer it
+/// came from -- the controller multiplexes reads from every connected
+/// target onto a single channel, since clipboard updates (and, once
+/// bidirectional control exists, other events) can arrive from any of them
+/// independent of which one currently has the mouse.
+async fn forward_incoming_tagged(
+    mut reader: mouseshare_net::ConnReader,
+    screen_id: String,
+    tx: tokio::sync::mpsc::UnboundedSender<(String, Result<Message, NetError>)>,
+) {
+    loop {
+        let result = reader.recv().await;
+        let is_err = result.is_err();
+        if tx.send((screen_id.clone(), result)).is_err() || is_err {
+            return;
+        }
+    }
+}
+
+/// One connected target: the write half kept for forwarding input to it,
+/// plus the guard that keeps its background reader task alive for exactly
+/// as long as this peer is considered connected.
+struct PeerHandle {
+    writer: mouseshare_net::ConnWriter,
+    _reader_guard: AbortOnDrop,
 }
 
 async fn handle_target_connection(
@@ -231,26 +311,88 @@ async fn handle_target_connection(
     }
 }
 
-/// Runs the controller role forever: connects to `target_addr`, then polls
-/// the local cursor position/capture deltas at a fixed tick rate, handing
-/// mouse and keyboard control off to the target and back based on
-/// `mouseshare_layout::EdgeDetector`. Clipboard sync runs alongside this,
-/// independent of which side currently has control.
+/// Runs the controller role forever: connects to every address in `targets`
+/// (keyed by the screen id it belongs to), then polls the local cursor
+/// position/capture deltas at a fixed tick rate, handing mouse and keyboard
+/// control off between the local screen and whichever remote screen the
+/// cursor is currently over, based on `mouseshare_layout::EdgeDetector`.
+/// Clipboard sync runs alongside this, independent of which side currently
+/// has control, and is broadcast to every connected target.
 ///
-/// Only returns on an unrecoverable error (failing to connect, a fatal X11
-/// or network error).
-pub async fn run_controller(layout: LayoutConfig, target_addr: SocketAddr) -> anyhow::Result<()> {
+/// `targets` must have an entry for every non-local screen in `layout`.
+///
+/// Every target is dialed independently: one bad address or a refused
+/// connection only takes that target out of the session (recorded in
+/// `peer_status` as `Failed`), it does not prevent the others from
+/// connecting. Only returns an error up front if *none* of the targets
+/// could be connected -- with nothing connected there is nothing to
+/// control, same as the empty-targets case.
+///
+/// Returns once every target has disconnected (nothing left to control), or
+/// on an unrecoverable error (a fatal X11 error). Losing just one of several
+/// targets does not end the session -- control simply can't be handed off to
+/// that screen anymore until it reconnects.
+pub async fn run_controller(
+    layout: LayoutConfig,
+    targets: HashMap<String, SocketAddr>,
+    peer_status: PeerStatusMap,
+) -> anyhow::Result<()> {
     let local = layout.local_screen().clone();
 
-    let mut conn = mouseshare_net::connect(target_addr).await?;
-    let peer = conn
-        .handshake_as_dialer(local.id.clone(), local.width, local.height)
-        .await?;
-    tracing::info!(?peer, "connected to target");
-
-    let (reader, mut writer) = conn.into_split();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let _reader_guard = AbortOnDrop(tokio::spawn(forward_incoming(reader, tx)));
+    let mut peers: HashMap<String, PeerHandle> = HashMap::new();
+    for (screen_id, addr) in targets {
+        peer_status
+            .lock()
+            .unwrap()
+            .insert(screen_id.clone(), PeerStatus::Connecting);
+
+        let connected = async {
+            let mut conn = mouseshare_net::connect(addr).await?;
+            let peer = conn
+                .handshake_as_dialer(local.id.clone(), local.width, local.height)
+                .await?;
+            Ok::<_, anyhow::Error>((conn, peer))
+        }
+        .await;
+
+        let (conn, peer) = match connected {
+            Ok(ok) => ok,
+            Err(e) => {
+                tracing::warn!(target = %screen_id, %addr, "failed to connect: {e}");
+                peer_status
+                    .lock()
+                    .unwrap()
+                    .insert(screen_id, PeerStatus::Failed(e.to_string()));
+                continue;
+            }
+        };
+        tracing::info!(?peer, target = %screen_id, "connected to target");
+        peer_status
+            .lock()
+            .unwrap()
+            .insert(screen_id.clone(), PeerStatus::Connected);
+
+        let (reader, writer) = conn.into_split();
+        let reader_guard = AbortOnDrop(tokio::spawn(forward_incoming_tagged(
+            reader,
+            screen_id.clone(),
+            tx.clone(),
+        )));
+        peers.insert(
+            screen_id,
+            PeerHandle {
+                writer,
+                _reader_guard: reader_guard,
+            },
+        );
+    }
+    // Only the reader tasks' clones should keep the channel open now.
+    drop(tx);
+
+    if peers.is_empty() {
+        anyhow::bail!("could not connect to any target; nothing to control");
+    }
 
     let mut cursor = LocalCursor::connect(None)?;
     let mut detector = EdgeDetector::new(layout, REENTRY_MARGIN);
@@ -265,6 +407,11 @@ pub async fn run_controller(layout: LayoutConfig, target_addr: SocketAddr) -> an
     let mut next_clipboard_poll = Instant::now();
 
     loop {
+        if peers.is_empty() {
+            tracing::info!("every target has disconnected; nothing left to control");
+            return Ok(());
+        }
+
         match detector.state().clone() {
             ControlState::Local => {
                 let (lx, ly) = cursor.query_pointer()?;
@@ -280,14 +427,23 @@ pub async fn run_controller(layout: LayoutConfig, target_addr: SocketAddr) -> an
                     }
                 }
             }
-            ControlState::Remote(_) => {
+            ControlState::Remote(mut peer_id) => {
                 let mut still_remote = true;
                 for (dx, dy) in cursor.poll_capture_delta()? {
                     match detector.on_remote_delta(dx, dy) {
                         None => {
-                            writer.send(&Message::MouseMove { dx, dy }).await?;
+                            if let Some(peer) = peers.get_mut(&peer_id) {
+                                peer.writer.send(&Message::MouseMove { dx, dy }).await?;
+                            }
+                            // No connection to this screen anymore: the
+                            // delta is silently dropped rather than treated
+                            // as an error, same as moving the mouse over a
+                            // screen that was never configured.
                         }
-                        Some(transition) if transition.new_state == ControlState::Local => {
+                        Some(Transition {
+                            new_state: ControlState::Local,
+                            local_target,
+                        }) => {
                             // This delta is the one that crossed back onto
                             // the local screen: it isn't forwarded (control
                             // is ours again), the pointer is placed exactly
@@ -298,19 +454,22 @@ pub async fn run_controller(layout: LayoutConfig, target_addr: SocketAddr) -> an
                             // dropped — at the tick rate used here that's at
                             // most a fraction of a pixel of local movement.
                             cursor.end_capture()?;
-                            if let Some((lx, ly)) = transition.local_target {
+                            if let Some((lx, ly)) = local_target {
                                 cursor.warp_absolute(lx, ly)?;
                             }
                             tracing::info!("control returned to local");
                             still_remote = false;
                             break;
                         }
-                        Some(transition) => {
-                            tracing::warn!(
-                                ?transition,
-                                "hand-off to a different remote screen isn't supported yet \
-                                 (single-peer MVP); dropping this delta"
+                        Some(Transition {
+                            new_state: ControlState::Remote(new_peer_id),
+                            ..
+                        }) => {
+                            tracing::info!(
+                                from = %peer_id, to = %new_peer_id,
+                                "control handed off to a different remote screen"
                             );
+                            peer_id = new_peer_id;
                         }
                     }
                 }
@@ -318,8 +477,13 @@ pub async fn run_controller(layout: LayoutConfig, target_addr: SocketAddr) -> an
                 // above just ended it (control returned to local), the
                 // keyboard grab is already released.
                 if still_remote {
-                    for (keycode, pressed) in cursor.poll_capture_keys()? {
-                        writer.send(&Message::KeyEvent { keycode, pressed }).await?;
+                    let keys = cursor.poll_capture_keys()?;
+                    if let Some(peer) = peers.get_mut(&peer_id) {
+                        for (keycode, pressed) in keys {
+                            peer.writer
+                                .send(&Message::KeyEvent { keycode, pressed })
+                                .await?;
+                        }
                     }
                 }
             }
@@ -327,22 +491,51 @@ pub async fn run_controller(layout: LayoutConfig, target_addr: SocketAddr) -> an
 
         loop {
             match rx.try_recv() {
-                Ok(Ok(Message::ClipboardText(text))) => {
+                Ok((screen_id, Ok(Message::ClipboardText(text)))) => {
                     if let Some(clipboard) = clipboard.as_mut() {
                         let bytes = text.len();
                         match clipboard.set_text(text) {
-                            Ok(()) => tracing::info!(bytes, "clipboard updated from target"),
+                            Ok(()) => {
+                                tracing::info!(bytes, from = %screen_id, "clipboard updated from target")
+                            }
                             Err(e) => tracing::warn!("failed to apply clipboard update: {e}"),
                         }
                     }
                 }
-                Ok(Ok(Message::Heartbeat)) => {}
-                Ok(Ok(other)) => tracing::warn!(?other, "unexpected message from target"),
-                Ok(Err(NetError::ConnectionClosed)) => return Ok(()),
-                Ok(Err(e)) => return Err(e.into()),
+                Ok((_, Ok(Message::Heartbeat))) => {}
+                Ok((screen_id, Ok(other))) => {
+                    tracing::warn!(?other, from = %screen_id, "unexpected message from target")
+                }
+                Ok((screen_id, Err(NetError::ConnectionClosed))) => {
+                    tracing::warn!(target = %screen_id, "target disconnected");
+                    peers.remove(&screen_id);
+                    peer_status.lock().unwrap().insert(
+                        screen_id.clone(),
+                        PeerStatus::Failed("disconnected".to_string()),
+                    );
+                    if detector.state() == &ControlState::Remote(screen_id) {
+                        let (lx, ly) = detector.force_local();
+                        cursor.end_capture()?;
+                        cursor.warp_absolute(lx, ly)?;
+                    }
+                }
+                Ok((screen_id, Err(e))) => {
+                    tracing::warn!(target = %screen_id, "connection error: {e}");
+                    peers.remove(&screen_id);
+                    peer_status
+                        .lock()
+                        .unwrap()
+                        .insert(screen_id.clone(), PeerStatus::Failed(e.to_string()));
+                    if detector.state() == &ControlState::Remote(screen_id) {
+                        let (lx, ly) = detector.force_local();
+                        cursor.end_capture()?;
+                        cursor.warp_absolute(lx, ly)?;
+                    }
+                }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                // Reader task always sends a terminal Err before its loop
-                // ends, so this means it was aborted/dropped instead.
+                // Reader tasks always send a terminal Err before ending, so
+                // this means every one of them was aborted/dropped instead
+                // (i.e. `peers` is already empty) rather than a clean close.
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
             }
         }
@@ -354,9 +547,18 @@ pub async fn run_controller(layout: LayoutConfig, target_addr: SocketAddr) -> an
                     Ok(Some(text)) => {
                         tracing::info!(
                             bytes = text.len(),
-                            "sending local clipboard change to target"
+                            targets = peers.len(),
+                            "sending local clipboard change to all targets"
                         );
-                        writer.send(&Message::ClipboardText(text)).await?;
+                        for peer in peers.values_mut() {
+                            if let Err(e) = peer
+                                .writer
+                                .send(&Message::ClipboardText(text.clone()))
+                                .await
+                            {
+                                tracing::warn!("failed to send clipboard update: {e}");
+                            }
+                        }
                     }
                     Ok(None) => {}
                     Err(e) => tracing::warn!("clipboard poll failed: {e}"),

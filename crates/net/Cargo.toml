@@ -12,6 +12,11 @@ mouseshare-protocol = { path = "../protocol" }
 tokio = { version = "1", default-features = false, features = ["net", "io-util"] }
 thiserror = "1"
 tracing = "0.1"
+spake2 = "0.4"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+getrandom = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["net", "io-util", "rt", "macros", "time"] }

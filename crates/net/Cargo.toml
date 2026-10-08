@@ -11,7 +11,7 @@ publish = false
 [dependencies]
 mouseshare-protocol = { path = "../protocol" }
 tokio = { version = "1", default-features = false, features = ["net", "io-util"] }
-thiserror = "1"
+thiserror = "2"
 tracing = "0.1"
 spake2 = "0.4"
 chacha20poly1305 = "0.10"

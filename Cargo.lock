@@ -1401,7 +1401,7 @@ dependencies = [
  "mouseshare-layout",
  "serde",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
  "toml",
  "tracing",
 ]
@@ -1426,7 +1426,7 @@ version = "0.2.0"
 dependencies = [
  "mdns-sd",
  "mouseshare-protocol",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1454,7 +1454,7 @@ name = "mouseshare-layout"
 version = "0.2.0"
 dependencies = [
  "serde",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
  "toml",
 ]
 
@@ -1468,7 +1468,7 @@ dependencies = [
  "mouseshare-protocol",
  "sha2",
  "spake2",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
 ]
@@ -1479,14 +1479,14 @@ version = "0.2.0"
 dependencies = [
  "bincode",
  "serde",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "mouseshare-x11input"
 version = "0.2.0"
 dependencies = [
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
  "tracing",
  "x11rb",
 ]

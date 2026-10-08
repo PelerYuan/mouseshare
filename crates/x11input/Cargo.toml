@@ -8,6 +8,6 @@ repository = "https://github.com/PelerYuan/mouseshare"
 publish = false
 
 [dependencies]
-x11rb = { version = "0.13", features = ["xtest"] }
+x11rb = { version = "0.13", features = ["xtest", "randr"] }
 thiserror = "1"
 tracing = "0.1"

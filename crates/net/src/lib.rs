@@ -3,16 +3,26 @@
 //! handshake used to exchange peer screen info and check protocol version
 //! compatibility.
 //!
+//! Every connection is authenticated and encrypted: the handshake runs a
+//! SPAKE2 key exchange keyed by the shared [`PairingCode`] before any
+//! application message is sent (see the `secure` module for the protocol
+//! and its rationale).
+//!
 //! This crate intentionally does *not* implement any heartbeat timer or
-//! timeout policy — `Message::Heartbeat` is just another message a caller
-//! can `send`/`recv` like any other. Timing policy belongs to the
-//! application.
+//! timeout policy -- `Message::Ping`/`Pong` are just messages a caller can
+//! `send`/`recv` like any other. Timing policy belongs to the application.
+
+mod pairing;
+mod secure;
+
+pub use pairing::{PairingCode, PairingCodeError};
 
 use std::net::SocketAddr;
 
 use mouseshare_protocol::{
-    decode_body, encode_frame, Message, ProtocolError, MAX_FRAME_LEN, PROTOCOL_VERSION,
+    decode_body, encode_frame, Message, MonitorInfo, ProtocolError, MAX_FRAME_LEN, PROTOCOL_VERSION,
 };
+use secure::Cipher;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
@@ -52,14 +62,19 @@ pub enum NetError {
     /// The peer's `PROTOCOL_VERSION` doesn't match ours.
     #[error("protocol version mismatch: local={local}, peer={peer}")]
     VersionMismatch { local: u32, peer: u32 },
+
+    /// Key confirmation failed: the pairing codes differ (or the other end
+    /// is not a mouseshare peer). Deliberately vague -- it must not tell an
+    /// attacker which half was wrong.
+    #[error("authentication failed (wrong pairing code?)")]
+    AuthFailed,
 }
 
 /// Info about the remote peer, learned during the handshake.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerInfo {
-    pub screen_id: String,
-    pub width: i32,
-    pub height: i32,
+    pub device_id: String,
+    pub monitors: Vec<MonitorInfo>,
 }
 
 /// A framed, handshaken (once you call one of the `handshake_as_*` methods)
@@ -69,12 +84,21 @@ pub struct PeerInfo {
 /// length-prefix framing defined by `mouseshare_protocol` internally.
 pub struct Connection {
     stream: TcpStream,
+    send_cipher: Option<Cipher>,
+    recv_cipher: Option<Cipher>,
 }
+
+/// Max size of a raw (pre-encryption) key-exchange frame.
+const MAX_RAW_HANDSHAKE_LEN: u32 = 256;
 
 impl Connection {
     fn new(stream: TcpStream) -> Result<Self, NetError> {
         stream.set_nodelay(true)?;
-        Ok(Self { stream })
+        Ok(Self {
+            stream,
+            send_cipher: None,
+            recv_cipher: None,
+        })
     }
 
     /// The remote peer's socket address.
@@ -82,62 +106,73 @@ impl Connection {
         self.stream.peer_addr()
     }
 
-    /// Encodes and writes one message to the peer.
+    /// Encodes, encrypts and writes one message to the peer.
     pub async fn send(&mut self, msg: &Message) -> Result<(), NetError> {
-        send_to(&mut self.stream, msg).await
+        send_to(&mut self.stream, self.send_cipher.as_mut(), msg).await
     }
 
-    /// Reads one length-prefixed message from the peer. See the
-    /// cancellation-safety note on the free function [`recv_from`], which
+    /// Reads, decrypts and decodes one message from the peer. See the
+    /// cancellation-safety note on the free function `recv_from`, which
     /// this delegates to.
     pub async fn recv(&mut self) -> Result<Message, NetError> {
-        recv_from(&mut self.stream).await
+        recv_from(&mut self.stream, self.recv_cipher.as_mut()).await
     }
 
     /// Splits into independent read/write halves backed by the same TCP
     /// connection, so one task can own [`ConnReader::recv`] in a plain loop
     /// while another independently owns [`ConnWriter::send`] -- avoids the
-    /// cancellation hazard documented on `recv()`/[`recv_from`] entirely,
+    /// cancellation hazard documented on `recv()`/`recv_from` entirely,
     /// rather than working around it with `select!`.
     pub fn into_split(self) -> (ConnReader, ConnWriter) {
         let (read_half, write_half) = self.stream.into_split();
         (
-            ConnReader { stream: read_half },
-            ConnWriter { stream: write_half },
+            ConnReader {
+                stream: read_half,
+                cipher: self.recv_cipher,
+            },
+            ConnWriter {
+                stream: write_half,
+                cipher: self.send_cipher,
+            },
         )
     }
 
     /// Performs the handshake as the side that initiated the TCP
-    /// connection (the dialer).
+    /// connection (the dialer): key exchange, then an encrypted `Hello`,
+    /// then the listener's encrypted `HelloAck`.
     ///
-    /// Sequence: dialer sends `Hello`, then waits for the listener's
-    /// `HelloAck`. Returns the peer's [`PeerInfo`] once the listener's
-    /// reported `PROTOCOL_VERSION` is confirmed to match ours.
-    ///
-    /// Takes `&mut self` (rather than consuming `self`) so the caller
-    /// still owns the `Connection` afterward for sending/receiving
-    /// further messages.
+    /// Fails with [`NetError::AuthFailed`] if the pairing codes differ.
     pub async fn handshake_as_dialer(
         &mut self,
-        screen_id: String,
-        width: i32,
-        height: i32,
+        code: &PairingCode,
+        local: &PeerInfo,
     ) -> Result<PeerInfo, NetError> {
+        let (pending, our_msg) = secure::start(code, true);
+        write_raw(&mut self.stream, &our_msg).await?;
+        let peer_msg = match read_raw(&mut self.stream).await {
+            Ok(m) => m,
+            // The listener hung up before answering: that's what a listener
+            // that already rate-limits us looks like, too.
+            Err(NetError::ConnectionClosed) => return Err(NetError::AuthFailed),
+            Err(e) => return Err(e),
+        };
+        let (send, recv) = secure::finish(pending, &peer_msg)?;
+        self.send_cipher = Some(send);
+        self.recv_cipher = Some(recv);
+
         self.send(&Message::Hello {
             version: PROTOCOL_VERSION,
-            screen_id,
-            width,
-            height,
+            device_id: local.device_id.clone(),
+            monitors: local.monitors.clone(),
         })
         .await?;
 
-        match self.recv().await? {
-            Message::HelloAck {
+        match self.recv().await {
+            Ok(Message::HelloAck {
                 version,
-                screen_id,
-                width,
-                height,
-            } => {
+                device_id,
+                monitors,
+            }) => {
                 if version != PROTOCOL_VERSION {
                     return Err(NetError::VersionMismatch {
                         local: PROTOCOL_VERSION,
@@ -145,36 +180,39 @@ impl Connection {
                     });
                 }
                 Ok(PeerInfo {
-                    screen_id,
-                    width,
-                    height,
+                    device_id,
+                    monitors,
                 })
             }
-            other => Err(NetError::UnexpectedMessage {
+            Ok(other) => Err(NetError::UnexpectedMessage {
                 expected: "HelloAck",
                 got: other,
             }),
+            // A listener that fails key confirmation simply closes.
+            Err(NetError::ConnectionClosed) => Err(NetError::AuthFailed),
+            Err(e) => Err(e),
         }
     }
 
     /// Performs the handshake as the side that accepted the TCP
     /// connection (the listener).
-    ///
-    /// Sequence: listener waits for the dialer's `Hello`, checks its
-    /// `PROTOCOL_VERSION`, then replies with its own `HelloAck`. Returns
-    /// the peer's [`PeerInfo`].
     pub async fn handshake_as_listener(
         &mut self,
-        screen_id: String,
-        width: i32,
-        height: i32,
+        code: &PairingCode,
+        local: &PeerInfo,
     ) -> Result<PeerInfo, NetError> {
+        let peer_msg = read_raw(&mut self.stream).await?;
+        let (pending, our_msg) = secure::start(code, false);
+        write_raw(&mut self.stream, &our_msg).await?;
+        let (send, recv) = secure::finish(pending, &peer_msg)?;
+        self.send_cipher = Some(send);
+        self.recv_cipher = Some(recv);
+
         match self.recv().await? {
             Message::Hello {
                 version,
-                screen_id: peer_screen_id,
-                width: peer_width,
-                height: peer_height,
+                device_id,
+                monitors,
             } => {
                 if version != PROTOCOL_VERSION {
                     return Err(NetError::VersionMismatch {
@@ -185,16 +223,14 @@ impl Connection {
 
                 self.send(&Message::HelloAck {
                     version: PROTOCOL_VERSION,
-                    screen_id,
-                    width,
-                    height,
+                    device_id: local.device_id.clone(),
+                    monitors: local.monitors.clone(),
                 })
                 .await?;
 
                 Ok(PeerInfo {
-                    screen_id: peer_screen_id,
-                    width: peer_width,
-                    height: peer_height,
+                    device_id,
+                    monitors,
                 })
             }
             other => Err(NetError::UnexpectedMessage {
@@ -246,31 +282,71 @@ pub async fn connect(addr: SocketAddr) -> Result<Connection, NetError> {
 
 /// The read half of a [`Connection`] split via [`Connection::into_split`].
 /// Meant to be owned by a single dedicated task looping on `recv()` — see
-/// the cancellation-safety note on [`recv_from`].
+/// the cancellation-safety note on `recv_from`.
 pub struct ConnReader {
     stream: OwnedReadHalf,
+    cipher: Option<Cipher>,
 }
 
 impl ConnReader {
     pub async fn recv(&mut self) -> Result<Message, NetError> {
-        recv_from(&mut self.stream).await
+        recv_from(&mut self.stream, self.cipher.as_mut()).await
     }
 }
 
 /// The write half of a [`Connection`] split via [`Connection::into_split`].
 pub struct ConnWriter {
     stream: OwnedWriteHalf,
+    cipher: Option<Cipher>,
 }
 
 impl ConnWriter {
     pub async fn send(&mut self, msg: &Message) -> Result<(), NetError> {
-        send_to(&mut self.stream, msg).await
+        send_to(&mut self.stream, self.cipher.as_mut(), msg).await
     }
 }
 
-async fn send_to<W: AsyncWrite + Unpin>(stream: &mut W, msg: &Message) -> Result<(), NetError> {
-    let framed = encode_frame(msg)?;
+async fn write_raw<W: AsyncWrite + Unpin>(stream: &mut W, body: &[u8]) -> Result<(), NetError> {
+    let mut framed = Vec::with_capacity(4 + body.len());
+    framed.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    framed.extend_from_slice(body);
     stream.write_all(&framed).await?;
+    Ok(())
+}
+
+async fn read_raw<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Vec<u8>, NetError> {
+    let mut len_buf = [0u8; 4];
+    read_exact_or_eof(stream, &mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf);
+    if len > MAX_RAW_HANDSHAKE_LEN {
+        return Err(NetError::FrameTooLarge {
+            len,
+            max: MAX_RAW_HANDSHAKE_LEN,
+        });
+    }
+    let mut body = vec![0u8; len as usize];
+    read_exact_or_eof(stream, &mut body).await?;
+    Ok(body)
+}
+
+async fn send_to<W: AsyncWrite + Unpin>(
+    stream: &mut W,
+    cipher: Option<&mut Cipher>,
+    msg: &Message,
+) -> Result<(), NetError> {
+    let framed = encode_frame(msg)?;
+    match cipher {
+        None => stream.write_all(&framed).await?,
+        Some(cipher) => {
+            // `framed` is len||body; only the body is encrypted, and the
+            // outer length prefix is recomputed to cover the tag too.
+            let sealed = cipher.seal(&framed[4..]);
+            let mut out = Vec::with_capacity(4 + sealed.len());
+            out.extend_from_slice(&(sealed.len() as u32).to_be_bytes());
+            out.extend_from_slice(&sealed);
+            stream.write_all(&out).await?;
+        }
+    }
     Ok(())
 }
 
@@ -286,25 +362,30 @@ async fn send_to<W: AsyncWrite + Unpin>(stream: &mut W, msg: &Message) -> Result
 /// this future is dropped mid-read (e.g. it lost a `tokio::select!` race),
 /// any bytes already read for the current frame are discarded but the
 /// connection's read position on the wire has still moved forward,
-/// desynchronizing subsequent framing. Do not call this as a branch in
-/// `select!` that might be cancelled; either give it its own dedicated
-/// task/loop (as [`ConnReader`] is meant to be used) or make sure the other
-/// branches can't fire once a call is in flight.
-async fn recv_from<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Message, NetError> {
+/// desynchronizing subsequent framing -- and, with encryption, the nonce
+/// counter. Do not call this as a branch in `select!` that might be
+/// cancelled; either give it its own dedicated task/loop (as
+/// [`ConnReader`] is meant to be used) or make sure the other branches
+/// can't fire once a call is in flight.
+async fn recv_from<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    cipher: Option<&mut Cipher>,
+) -> Result<Message, NetError> {
     let mut len_buf = [0u8; 4];
     read_exact_or_eof(stream, &mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf);
-    if len > MAX_FRAME_LEN {
-        return Err(NetError::FrameTooLarge {
-            len,
-            max: MAX_FRAME_LEN,
-        });
+    let max = MAX_FRAME_LEN + secure::TAG_LEN as u32;
+    if len > max {
+        return Err(NetError::FrameTooLarge { len, max });
     }
 
     let mut body = vec![0u8; len as usize];
     read_exact_or_eof(stream, &mut body).await?;
-    let msg = decode_body(&body)?;
-    Ok(msg)
+    let plain = match cipher {
+        Some(cipher) => cipher.open(&body)?,
+        None => body,
+    };
+    Ok(decode_body(&plain)?)
 }
 
 /// Like `AsyncReadExt::read_exact`, but maps a clean or mid-frame EOF to

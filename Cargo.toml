@@ -4,22 +4,22 @@ resolver = "2"
 
 [package]
 name = "mouseshare"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.88"
 description = "A lightweight LAN mouse/keyboard/clipboard sharing tool for Linux/X11"
 license = "MIT"
 repository = "https://github.com/PelerYuan/mouseshare"
 
 [dependencies]
 mouseshare-core = { path = "crates/core" }
+mouseshare-config = { path = "crates/config" }
 mouseshare-layout = { path = "crates/layout" }
 # Single-threaded runtime: this app is one connection, polled at a fixed
 # tick rate, not a concurrent server -- a thread pool would just be idle
 # threads sitting in memory for no benefit.
 tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
-toml = "0.8"
-serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 anyhow = "1"

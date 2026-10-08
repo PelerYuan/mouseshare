@@ -37,8 +37,10 @@ pub use clipboard::Clipboard;
 
 use x11rb::connection::Connection;
 use x11rb::errors::{ConnectError, ConnectionError, ReplyError, ReplyOrIdError};
+use x11rb::protocol::randr::ConnectionExt as RandrConnectionExt;
 use x11rb::protocol::xproto::{
-    ConnectionExt, EventMask, GrabMode, GrabStatus, Window, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
+    ConnectionExt, EventMask, GrabMode, GrabStatus, Window, BUTTON_PRESS_EVENT,
+    BUTTON_RELEASE_EVENT, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
 };
 use x11rb::protocol::xtest::ConnectionExt as XtestConnectionExt;
 use x11rb::protocol::Event;
@@ -77,6 +79,43 @@ pub enum X11Error {
     NotCapturing,
 }
 
+/// One physical monitor, in root-window coordinates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Monitor {
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub primary: bool,
+}
+
+/// One input event observed while capturing, in the order the server sent
+/// them (so a button press followed by motion stays a press-then-drag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureEvent {
+    /// Relative pointer motion since the previous event.
+    Motion {
+        dx: i32,
+        dy: i32,
+    },
+    Key {
+        keycode: u8,
+        pressed: bool,
+    },
+    /// Pointer button (X11 numbering: 1 left, 2 middle, 3 right, 8/9
+    /// back/forward). Wheel notches are reported as [`CaptureEvent::Scroll`].
+    Button {
+        button: u8,
+        pressed: bool,
+    },
+    /// Wheel notches; positive `dy` is down, positive `dx` is right.
+    Scroll {
+        dx: i32,
+        dy: i32,
+    },
+}
+
 /// A reference point, plus buffered events not yet claimed by the
 /// corresponding `poll_capture_*` method, used while in "capture" mode.
 ///
@@ -87,8 +126,7 @@ pub enum X11Error {
 /// logic.
 struct CaptureState {
     center: (i32, i32),
-    pending_deltas: Vec<(i32, i32)>,
-    pending_keys: Vec<(u8, bool)>,
+    pending: Vec<CaptureEvent>,
 }
 
 /// A connection to a single X display, with the local root window's geometry
@@ -179,8 +217,7 @@ impl LocalCursor {
 
         self.capture = Some(CaptureState {
             center,
-            pending_deltas: Vec::new(),
-            pending_keys: Vec::new(),
+            pending: Vec::new(),
         });
         Ok(())
     }
@@ -233,8 +270,7 @@ impl LocalCursor {
         let center = self.capture.as_ref().ok_or(X11Error::NotCapturing)?.center;
 
         let mut last = center;
-        let mut new_deltas = Vec::new();
-        let mut new_keys = Vec::new();
+        let mut new_events = Vec::new();
         while let Some(event) = self.conn.poll_for_event()? {
             match event {
                 Event::MotionNotify(motion) => {
@@ -242,14 +278,36 @@ impl LocalCursor {
                     let dx = pos.0 - last.0;
                     let dy = pos.1 - last.1;
                     if dx != 0 || dy != 0 {
-                        new_deltas.push((dx, dy));
+                        new_events.push(CaptureEvent::Motion { dx, dy });
                     }
                     last = pos;
                 }
-                Event::KeyPress(key) => new_keys.push((key.detail, true)),
-                Event::KeyRelease(key) => new_keys.push((key.detail, false)),
-                // Other event kinds (button presses, etc.) are outside this
-                // crate's scope and are intentionally dropped.
+                Event::KeyPress(key) => new_events.push(CaptureEvent::Key {
+                    keycode: key.detail,
+                    pressed: true,
+                }),
+                Event::KeyRelease(key) => new_events.push(CaptureEvent::Key {
+                    keycode: key.detail,
+                    pressed: false,
+                }),
+                Event::ButtonPress(b) => match b.detail {
+                    4 => new_events.push(CaptureEvent::Scroll { dx: 0, dy: -1 }),
+                    5 => new_events.push(CaptureEvent::Scroll { dx: 0, dy: 1 }),
+                    6 => new_events.push(CaptureEvent::Scroll { dx: -1, dy: 0 }),
+                    7 => new_events.push(CaptureEvent::Scroll { dx: 1, dy: 0 }),
+                    n => new_events.push(CaptureEvent::Button {
+                        button: n,
+                        pressed: true,
+                    }),
+                },
+                // Wheel "buttons" only generate a press we already turned
+                // into a notch; their release carries no information.
+                Event::ButtonRelease(b) if !(4..=7).contains(&b.detail) => {
+                    new_events.push(CaptureEvent::Button {
+                        button: b.detail,
+                        pressed: false,
+                    });
+                }
                 _ => {}
             }
         }
@@ -279,8 +337,7 @@ impl LocalCursor {
         // mid-drain, which can't actually happen since we hold `&mut self`,
         // but keeps this robust to future refactors.
         let state = self.capture.as_mut().ok_or(X11Error::NotCapturing)?;
-        state.pending_deltas.extend(new_deltas);
-        state.pending_keys.extend(new_keys);
+        state.pending.extend(new_events);
         Ok(())
     }
 
@@ -297,7 +354,25 @@ impl LocalCursor {
     pub fn poll_capture_delta(&mut self) -> Result<Vec<(i32, i32)>, X11Error> {
         self.drain_queued_events()?;
         let state = self.capture.as_mut().ok_or(X11Error::NotCapturing)?;
-        Ok(std::mem::take(&mut state.pending_deltas))
+        let mut deltas = Vec::new();
+        state.pending.retain(|ev| match ev {
+            CaptureEvent::Motion { dx, dy } => {
+                deltas.push((*dx, *dy));
+                false
+            }
+            _ => true,
+        });
+        Ok(deltas)
+    }
+
+    /// Drains *every* event received since the last poll, motion, keys,
+    /// buttons and wheel notches alike, in the exact order the server
+    /// reported them. This is what a controller should use: it preserves
+    /// press-then-drag ordering that the per-kind pollers cannot.
+    pub fn poll_capture_events(&mut self) -> Result<Vec<CaptureEvent>, X11Error> {
+        self.drain_queued_events()?;
+        let state = self.capture.as_mut().ok_or(X11Error::NotCapturing)?;
+        Ok(std::mem::take(&mut state.pending))
     }
 
     /// Drains all `KeyPress`/`KeyRelease` events received since the last
@@ -316,7 +391,15 @@ impl LocalCursor {
     pub fn poll_capture_keys(&mut self) -> Result<Vec<(u8, bool)>, X11Error> {
         self.drain_queued_events()?;
         let state = self.capture.as_mut().ok_or(X11Error::NotCapturing)?;
-        Ok(std::mem::take(&mut state.pending_keys))
+        let mut keys = Vec::new();
+        state.pending.retain(|ev| match ev {
+            CaptureEvent::Key { keycode, pressed } => {
+                keys.push((*keycode, *pressed));
+                false
+            }
+            _ => true,
+        });
+        Ok(keys)
     }
 
     /// Ungrabs the pointer and the keyboard, leaving capture mode.
@@ -371,5 +454,103 @@ impl LocalCursor {
             .check()?;
         self.conn.flush()?;
         Ok(())
+    }
+
+    /// Injects a pointer button press or release via XTest.
+    pub fn inject_button(&self, button: u8, pressed: bool) -> Result<(), X11Error> {
+        let event_type = if pressed {
+            BUTTON_PRESS_EVENT
+        } else {
+            BUTTON_RELEASE_EVENT
+        };
+        self.conn
+            .xtest_fake_input(event_type, button, 0, self.root, 0, 0, 0)?
+            .check()?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Injects wheel notches. X11 models the wheel as buttons 4/5
+    /// (up/down) and 6/7 (left/right); each notch is a press+release.
+    /// Counts are capped so a corrupt message can't spin the server.
+    pub fn inject_scroll(&self, dx: i32, dy: i32) -> Result<(), X11Error> {
+        const MAX_NOTCHES: i32 = 64;
+        let notches = |count: i32, button: u8| -> Result<(), X11Error> {
+            for _ in 0..count.clamp(0, MAX_NOTCHES) {
+                self.inject_button(button, true)?;
+                self.inject_button(button, false)?;
+            }
+            Ok(())
+        };
+        notches(-dy, 4)?;
+        notches(dy, 5)?;
+        notches(-dx, 6)?;
+        notches(dx, 7)?;
+        Ok(())
+    }
+
+    /// The physical monitors currently configured on this display, from
+    /// RandR 1.5 `GetMonitors`. Falls back to one monitor covering the
+    /// whole root window when RandR is unavailable or reports nothing
+    /// (e.g. a bare `Xvfb`), so callers can always rely on at least one
+    /// entry. Sorted left-to-right, top-to-bottom for stable output.
+    pub fn monitors(&self) -> Result<Vec<Monitor>, X11Error> {
+        let mut out = Vec::new();
+        if let Ok(cookie) = self.conn.randr_get_monitors(self.root, true) {
+            if let Ok(reply) = cookie.reply() {
+                for m in reply.monitors {
+                    if m.width == 0 || m.height == 0 {
+                        continue;
+                    }
+                    let name = self
+                        .conn
+                        .get_atom_name(m.name)
+                        .ok()
+                        .and_then(|c| c.reply().ok())
+                        .map(|r| String::from_utf8_lossy(&r.name).into_owned())
+                        .unwrap_or_default();
+                    out.push(Monitor {
+                        name,
+                        x: m.x as i32,
+                        y: m.y as i32,
+                        width: m.width as i32,
+                        height: m.height as i32,
+                        primary: m.primary,
+                    });
+                }
+            }
+        }
+        if out.is_empty() {
+            out.push(Monitor {
+                name: "screen".to_string(),
+                x: 0,
+                y: 0,
+                width: self.width,
+                height: self.height,
+                primary: true,
+            });
+        }
+        out.sort_by_key(|m| (m.x, m.y));
+        Ok(out)
+    }
+
+    /// The keycode currently mapped to X keysym `keysym` (e.g. `0xff1b`
+    /// for Escape), if any. Used to recognise hotkeys in captured input
+    /// without hard-coding a keyboard layout's keycodes.
+    pub fn keycode_for_keysym(&self, keysym: u32) -> Result<Option<u8>, X11Error> {
+        let setup = self.conn.setup();
+        let min = setup.min_keycode;
+        let count = setup.max_keycode - min + 1;
+        let mapping = self.conn.get_keyboard_mapping(min, count)?.reply()?;
+        let per = mapping.keysyms_per_keycode as usize;
+        if per == 0 {
+            return Ok(None);
+        }
+        for (i, syms) in mapping.keysyms.chunks(per).enumerate() {
+            if syms.contains(&keysym) {
+                return Ok(Some(min + i as u8));
+            }
+        }
+        Ok(None)
     }
 }

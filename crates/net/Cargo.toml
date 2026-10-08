@@ -1,7 +1,8 @@
 [package]
 name = "mouseshare-net"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.88"
 description = "TCP transport and framing for mouseshare's wire protocol"
 license = "MIT"
 repository = "https://github.com/PelerYuan/mouseshare"
@@ -12,6 +13,11 @@ mouseshare-protocol = { path = "../protocol" }
 tokio = { version = "1", default-features = false, features = ["net", "io-util"] }
 thiserror = "1"
 tracing = "0.1"
+spake2 = "0.4"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+getrandom = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["net", "io-util", "rt", "macros", "time"] }

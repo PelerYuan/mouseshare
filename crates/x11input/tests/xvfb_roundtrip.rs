@@ -515,3 +515,127 @@ fn inject_key_sets_and_clears_query_keymap_bit() {
         "keycode {keycode} should be up after inject_key(_, false)"
     );
 }
+
+/// Buttons and wheel notches are captured in order, with wheel "buttons"
+/// 4-7 folded into `Scroll` events instead of bogus button presses.
+#[test]
+fn capture_reports_buttons_and_scroll_in_order() {
+    use mouseshare_x11input::CaptureEvent;
+    let guard = XvfbGuard::spawn(93, 800, 600);
+    let mut cursor = connect_retrying(&guard.display);
+    cursor.begin_capture().expect("begin_capture");
+
+    xdotool(&guard.display, &["mousedown", "1"]);
+    xdotool(&guard.display, &["mouseup", "1"]);
+    xdotool(&guard.display, &["click", "5"]); // wheel down
+    xdotool(&guard.display, &["click", "4"]); // wheel up
+    xdotool(&guard.display, &["click", "3"]); // right button
+
+    let mut events = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while events.len() < 6 && Instant::now() < deadline {
+        events.extend(cursor.poll_capture_events().expect("poll"));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    events.retain(|e| !matches!(e, CaptureEvent::Motion { .. }));
+    assert_eq!(
+        events,
+        vec![
+            CaptureEvent::Button {
+                button: 1,
+                pressed: true
+            },
+            CaptureEvent::Button {
+                button: 1,
+                pressed: false
+            },
+            CaptureEvent::Scroll { dx: 0, dy: 1 },
+            CaptureEvent::Scroll { dx: 0, dy: -1 },
+            CaptureEvent::Button {
+                button: 3,
+                pressed: true
+            },
+            CaptureEvent::Button {
+                button: 3,
+                pressed: false
+            },
+        ]
+    );
+    cursor.end_capture().expect("end_capture");
+}
+
+/// `inject_button` is visible to other clients as pointer button state, and
+/// `inject_scroll` produces the right number of wheel-button presses.
+#[test]
+fn inject_button_and_scroll_are_observable() {
+    use x11rb::protocol::xproto::{ButtonMask, ChangeWindowAttributesAux, EventMask};
+    use x11rb::protocol::Event;
+
+    let guard = XvfbGuard::spawn(92, 800, 600);
+    let cursor = connect_retrying(&guard.display);
+    let (conn, screen_num) = x11rb::connect(Some(&guard.display)).expect("observer connection");
+    let root = conn.setup().roots[screen_num].root;
+    conn.change_window_attributes(
+        root,
+        &ChangeWindowAttributesAux::new().event_mask(EventMask::BUTTON_PRESS),
+    )
+    .unwrap()
+    .check()
+    .expect("select button events on root");
+
+    cursor.inject_button(1, true).expect("press");
+    let mask = || {
+        conn.query_pointer(root)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .mask
+            .contains(ButtonMask::from(1u16 << 8))
+    };
+    let mut down = false;
+    for _ in 0..50 {
+        if mask() {
+            down = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(down, "button 1 should read as held after inject_button");
+    cursor.inject_button(1, false).expect("release");
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!mask(), "button 1 should be released");
+
+    // Drain the press we caused above, then check the wheel.
+    while conn.poll_for_event().unwrap().is_some() {}
+    cursor.inject_scroll(0, 2).expect("scroll down twice");
+    cursor.inject_scroll(-1, 0).expect("scroll left once");
+    let mut details = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while details.len() < 3 && Instant::now() < deadline {
+        while let Some(ev) = conn.poll_for_event().unwrap() {
+            if let Event::ButtonPress(b) = ev {
+                details.push(b.detail);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(details, vec![5, 5, 6]);
+}
+
+/// A display without RandR monitors still reports exactly one monitor
+/// covering the whole screen, and keysym lookup finds real keycodes.
+#[test]
+fn monitors_fall_back_to_the_root_window_and_keysyms_resolve() {
+    let guard = XvfbGuard::spawn(91, 1024, 768);
+    let cursor = connect_retrying(&guard.display);
+    let monitors = cursor.monitors().expect("monitors");
+    assert_eq!(monitors.len(), 1);
+    assert_eq!((monitors[0].width, monitors[0].height), (1024, 768));
+    assert_eq!((monitors[0].x, monitors[0].y), (0, 0));
+
+    let escape = cursor
+        .keycode_for_keysym(0xff1b)
+        .expect("keysym lookup")
+        .expect("Escape is mapped");
+    assert_eq!(escape, xmodmap_keycode_for(&guard.display, "Escape"));
+}

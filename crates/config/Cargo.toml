@@ -1,0 +1,19 @@
+[package]
+name = "mouseshare-config"
+version = "0.1.0"
+edition = "2021"
+description = "Persistent settings, device book and pairing codes shared by every mouseshare frontend"
+license = "MIT"
+repository = "https://github.com/PelerYuan/mouseshare"
+publish = false
+
+[dependencies]
+mouseshare-core = { path = "../core" }
+mouseshare-layout = { path = "../layout" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+thiserror = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

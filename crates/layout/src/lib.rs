@@ -295,11 +295,13 @@ pub struct Transition {
 /// devices. The node that owns the physical mouse runs this continuously;
 /// peers never need to report their cursor position back, because every
 /// delta forwarded to them originated here.
+#[derive(Clone)]
 pub struct EdgeDetector {
     layout: LayoutConfig,
     state: ControlState,
     virtual_pos: (i32, i32),
     reentry_margin: i32,
+    hold: bool,
 }
 
 impl EdgeDetector {
@@ -312,7 +314,15 @@ impl EdgeDetector {
             state: ControlState::Local,
             virtual_pos: start,
             reentry_margin,
+            hold: false,
         }
+    }
+
+    /// While `true`, the cursor is pinned to the device it is on: it can
+    /// still move, but running off the edge clamps instead of handing off.
+    /// Used so dragging with a button held can't switch machines mid-drag.
+    pub fn set_hold(&mut self, hold: bool) {
+        self.hold = hold;
     }
 
     pub fn state(&self) -> &ControlState {
@@ -391,10 +401,12 @@ impl EdgeDetector {
         if current.contains_virtual(pos.0, pos.1, self.reentry_margin) {
             return None;
         }
-        if let Some(t) = self.enter_device_at(pos, &current_id) {
-            return Some(t);
+        if !self.hold {
+            if let Some(t) = self.enter_device_at(pos, &current_id) {
+                return Some(t);
+            }
         }
-        // No neighbour there: clamp to the nearest point of this device.
+        // No neighbour (or hand-off suppressed) there: clamp to the nearest point of this device.
         let (lx, ly) = current.clamp_virtual(pos.0, pos.1);
         self.virtual_pos = (current.x + lx, current.y + ly);
         None
@@ -643,6 +655,18 @@ mod tests {
         let t = d.on_local_move(500, 799).expect("hand off to C");
         assert_eq!(t.new_state, ControlState::Remote("C".into()));
         assert_eq!(t.remote_target, Some((500, 0)));
+    }
+
+    #[test]
+    fn hold_pins_the_cursor_to_its_device() {
+        let mut d = EdgeDetector::new(two_screen_layout(), 2);
+        d.on_local_move(999, 400).unwrap();
+        d.set_hold(true);
+        assert_eq!(d.on_remote_delta(-300, 0), None);
+        assert_eq!(*d.state(), ControlState::Remote("B".into()));
+        assert_eq!(d.virtual_pos(), (1000, 400));
+        d.set_hold(false);
+        assert!(d.on_remote_delta(-300, 0).is_some());
     }
 
     #[test]
